@@ -1,0 +1,11 @@
+# Ubic Tracker — Windows only (uses winreg, ctypes.windll, DPAPI).
+# Pinned to major versions so a fresh build cannot pick up a breaking API change.
+
+paho-mqtt>=2.0,<3.0
+watchdog>=4.0,<7.0
+pystray>=0.19,<1.0
+Pillow>=10.0,<12.0
+psutil>=5.9,<8.0
+
+# Build only:
+# pyinstaller>=6.0

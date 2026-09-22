@@ -1,0 +1,36 @@
+# Files Ubic writes next to itself at runtime. These contain personal data -
+# your broker address, MQTT username, encrypted password, profile names and a
+# history of what you have played - and must never be committed.
+ubic_config.json
+ubic_config.json.tmp
+ubic_debug.log
+ubic_debug.log.*
+ubic_diagnostics.txt
+ubic_ubi_ids.json
+
+# Local backups / scratch copies
+*_backup.py
+*.bak
+*.orig
+
+# PyInstaller
+build/
+dist/
+*.spec
+*.manifest
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
