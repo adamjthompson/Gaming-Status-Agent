@@ -20,7 +20,7 @@ from watchdog.events import FileSystemEventHandler
 import pystray
 from PIL import Image, ImageDraw
 import psutil
-
+ 
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Ubic" rather than "Ubic.exe".
 UBIC_VERSION = "1.0.0"

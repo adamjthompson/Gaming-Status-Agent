@@ -16,7 +16,7 @@ Home Assistant discovers the sensor automatically. No YAML required.
 - A Home Assistant instance with the [MQTT integration](https://www.home-assistant.io/integrations/mqtt/)
   set up and a broker it can reach (Mosquitto is the usual choice)
 - Python 3.8+ if running from source
-
+ 
 ## Install
 
 **From a release:** download `Ubic.exe`, put it anywhere you like, and run it.

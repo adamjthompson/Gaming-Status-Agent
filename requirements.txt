@@ -9,3 +9,4 @@ psutil>=5.9,<8.0
 
 # Build only:
 # pyinstaller>=6.0
+

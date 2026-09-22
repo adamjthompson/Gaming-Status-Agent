@@ -1,6 +1,6 @@
 @echo off
 setlocal
-
+ 
 rem Build Ubic.exe. Safe to double-click from Explorer.
 
 rem Explorer starts batch files in C:\Windows\System32, so move to this file's

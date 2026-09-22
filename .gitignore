@@ -8,7 +8,7 @@ ubic_debug.log.*
 ubic_diagnostics.txt
 ubic_ubi_ids.json
 
-# Local backups / scratch copies
+# Local backups / scratch copies 
 *_backup.py
 *.bak
 *.orig
