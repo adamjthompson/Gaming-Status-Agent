@@ -37,8 +37,8 @@ tray. Right-click it and open **MQTT Settings** to enter your broker address.
 |---|---|
 | **MQTT Settings** | Broker address, port, credentials, TLS, the device name, poll rate |
 | **Platforms** | Which stores to track — Steam and Xbox start switched off |
-| **Account Settings** | Your gamertag per store — shown as the sensor's `Profile Name` |
-| **Custom Games** | Match games Gaming Status Agent doesn't detect on its own, by executable or window title |
+| **Gamertags** | Your gamertag per store — shown as the sensor's `Profile Name`. Lists only the platforms you're tracking |
+| **Custom Games** | Match games Gaming Status Agent doesn't detect on its own, by executable or window title. Appears once **Custom** is switched on under Platforms |
 | **Run Diagnostics** | Shows exactly what Gaming Status Agent currently sees and why. Start here when something looks wrong |
 | **Force Offline** | Immediately publish Offline, whatever detection thinks |
 | **Quit** | Publishes Offline, then exits |
@@ -144,9 +144,19 @@ here because they're handy to set when deploying the same config to several PCs:
 | `ENABLE_EA` | `true` |
 | `ENABLE_AMAZON` | `true` |
 | `ENABLE_PLAYNITE` | `true` |
-| `ENABLE_CUSTOM` | `true` |
+| `ENABLE_CUSTOM` | `false` |
 | `ENABLE_STEAM` | `false` |
 | `ENABLE_XBOX` | `false` |
+
+A switched-off platform is skipped completely — its registry and manifest scans
+never run at startup, and the poller doesn't check it each tick. Turning off
+everything you don't use makes the poll measurably cheaper.
+
+Upgrading from a version without these keys keeps the same behaviour: the `true`
+defaults above cover everything that used to be detected. `ENABLE_CUSTOM` is the
+one exception — it defaults to `false` for a fresh install, but a config that
+already has `CUSTOM_GAMES` rules switches it on automatically so those keep
+working.
 
 ### `CATALOG_URL`
 

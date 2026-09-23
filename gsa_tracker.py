@@ -156,11 +156,12 @@ DEFAULT_CONFIG = {
     "STEAM_PROFILE_NAME": "",
     "XBOX_PROFILE_NAME": "",
     # Per-platform switches, all editable from the tray under "Platforms".
-    # Everything that shipped before toggles existed defaults to on, so an
-    # upgrade changes nothing. Steam and Xbox default to off: each has an
-    # official Home Assistant integration of its own, and turning them on here
-    # without asking would silently publish a second, competing source for the
-    # same play session.
+    # Steam and Xbox default to off: each has an official Home Assistant
+    # integration of its own, and turning them on here without asking would
+    # silently publish a second, competing source for the same play session.
+    # Custom defaults to off because a fresh install has no rules to run; it is
+    # switched on automatically for a config that already has some (see
+    # load_config), so an upgrade never loses working rules.
     "ENABLE_EPIC": True,
     "ENABLE_UBISOFT": True,
     "ENABLE_GOG": True,
@@ -168,7 +169,7 @@ DEFAULT_CONFIG = {
     "ENABLE_EA": True,
     "ENABLE_AMAZON": True,
     "ENABLE_PLAYNITE": True,
-    "ENABLE_CUSTOM": True,
+    "ENABLE_CUSTOM": False,
     "ENABLE_STEAM": False,
     "ENABLE_XBOX": False,
     "MQTT_BROKER": "192.168.1.xxx",
@@ -509,6 +510,14 @@ def load_config():
     merged["MQTT_PORT"] = _coerce_int(merged.get("MQTT_PORT"), 1883, 1, 65535)
     merged["POLL_INTERVAL"] = _coerce_int(merged.get("POLL_INTERVAL"), 5, 1, 3600)
     merged["MQTT_TLS"] = bool(merged.get("MQTT_TLS"))
+
+    # Custom ships off, but a config written before the toggle existed and
+    # carrying rules was relying on them running. Switching it on here keeps
+    # those working across the upgrade; once the key is present the user's own
+    # choice is what counts, including turning it back off with rules defined.
+    if "ENABLE_CUSTOM" not in data and data.get("CUSTOM_GAMES"):
+        debug_log("Existing Custom Games rules found; enabling the Custom platform.")
+        merged["ENABLE_CUSTOM"] = True
 
     # A hand-edited config can carry "false" or 0 here; bool("false") is True,
     # so the string forms are resolved before coercing.
@@ -1532,6 +1541,29 @@ def snapshot_processes():
     return snapshot, processes, running_exes
 
 
+# Platforms whose detector needs the process list. Epic needs it to notice a
+# game has exited; the rest match a running process against an install folder
+# or executable. Used to decide whether a poll needs to enumerate processes at
+# all, so a machine with everything switched off does no work per tick.
+PROCESS_BACKED_PLATFORMS = ("Epic", "Steam", "GOG", "Battle.net", "Xbox", "Custom")
+
+
+def poll_work_needed():
+    """What this tick actually has to collect, given the enabled platforms.
+
+    Returns (needs_windows, needs_processes). Enumerating top-level windows and
+    walking every process are by far the most expensive things the poller does,
+    so neither runs unless some enabled source consumes the result.
+    """
+    # Window titles feed the ancestry scan, the Custom window-title rules, and
+    # Epic's "is a launcher-descended window still open" liveness check.
+    needs_windows = bool(ACTIVE_LAUNCHERS) or platform_enabled("Custom") \
+        or platform_enabled("Epic")
+    needs_processes = bool(ACTIVE_LAUNCHERS) or any(
+        platform_enabled(name) for name in PROCESS_BACKED_PLATFORMS)
+    return needs_windows, needs_processes
+
+
 def resolve_named_sources(processes, epic_title):
     """Every platform that can name a running game, in priority order.
 
@@ -1587,30 +1619,43 @@ class CustomGameTracker(threading.Thread):
             self.stop_event.wait(poll_interval)
 
     def poll_once(self):
-        custom_games = CONFIG.get("CUSTOM_GAMES", [])
+        custom_enabled = platform_enabled("Custom")
+        epic_enabled = platform_enabled("Epic")
+        custom_games = CONFIG.get("CUSTOM_GAMES", []) if custom_enabled else []
 
         found_game = None
         found_launcher = None
-        windows = get_active_window_titles()
 
-        snapshot, processes, running_exes = snapshot_processes()
+        # Collect only what an enabled source will actually read. Both of these
+        # are expensive, and a disabled platform must not pay for either.
+        needs_windows, needs_processes = poll_work_needed()
+        windows = get_active_window_titles() if needs_windows else []
+        if needs_processes:
+            snapshot, processes, running_exes = snapshot_processes()
+        else:
+            snapshot, processes, running_exes = {}, [], set()
 
         # 1. Dynamic Window Ancestry Scan
         epic_window_alive = False
         candidates = []
-        for win in windows:
-            title = win["title"]
-            if title.lower().endswith(BROWSER_SUFFIXES):
-                continue
-            if win["pid"] <= 0:
-                continue
+        # With every ancestry launcher switched off there is nothing to match,
+        # and Epic's liveness check is pointless once Epic itself is off.
+        if windows and (ACTIVE_LAUNCHERS or epic_enabled):
+            for win in windows:
+                title = win["title"]
+                if title.lower().endswith(BROWSER_SUFFIXES):
+                    continue
+                if win["pid"] <= 0:
+                    continue
 
-            if not epic_window_alive and descends_from_epic(win["pid"], snapshot):
-                epic_window_alive = True
+                if epic_enabled and not epic_window_alive \
+                        and descends_from_epic(win["pid"], snapshot):
+                    epic_window_alive = True
 
-            launcher = find_launcher_ancestor(win["pid"], snapshot)
-            if launcher:
-                candidates.append((win.get("area", 0), title, launcher))
+                if ACTIVE_LAUNCHERS:
+                    launcher = find_launcher_ancestor(win["pid"], snapshot)
+                    if launcher:
+                        candidates.append((win.get("area", 0), title, launcher))
 
         if candidates:
             # Pick the biggest window rather than the first one enumerated.
@@ -1621,7 +1666,7 @@ class CustomGameTracker(threading.Thread):
             _, found_game, found_launcher = max(candidates, key=lambda c: c[0])
 
         # 2. Check JSON Custom Games (Using Dropdown/Type Rules)
-        if not found_game and custom_games and platform_enabled("Custom"):
+        if not found_game and custom_games:
             filtered_titles = [
                 w["title"].lower() for w in windows
                 if not w["title"].lower().endswith(BROWSER_SUFFIXES)
@@ -1639,8 +1684,10 @@ class CustomGameTracker(threading.Thread):
                     break
 
         # 3. Retire Epic games whose process has gone away
-        reconcile_epic_games(running_exes, epic_window_alive)
-        epic_title = epic_active_title()
+        epic_title = None
+        if epic_enabled:
+            reconcile_epic_games(running_exes, epic_window_alive)
+            epic_title = epic_active_title()
 
         # 4. Installed games from each platform's own database, matched by the
         # running process. Each source is skipped when its platform is off.
@@ -2140,7 +2187,7 @@ def check_initial_config():
             f"This becomes your Home Assistant sensor "
             f"(sensor.gsa_{sanitize_topic_part(CONFIG.get('HA_DEVICE_NAME', ''))}).\n\n"
             f"Gaming Status Agent is now running in your System Tray. Right-click the icon to set "
-            f"your MQTT broker, change the device name, or add Custom Games."
+            f"your MQTT broker, change the device name, or choose which Platforms to track."
         )
     else:
         CONFIG = load_config()
@@ -2247,24 +2294,40 @@ def open_settings(icon, item):
     ROOT.after(0, show_settings_ui)
 
 
-def show_account_settings_ui():
-    if _focus_existing("accounts"):
+def gamertag_fields():
+    """(config key, platform name) for each tracked platform that has a gamertag.
+
+    Listed in PLATFORM_ORDER, and only while the platform is switched on: a
+    gamertag for something that is not being tracked is never published, so
+    showing the field would only invite filling in a box that does nothing.
+    """
+    return [(LAUNCHER_PROFILE_KEYS[name], name) for name in PLATFORM_ORDER
+            if name in LAUNCHER_PROFILE_KEYS and platform_enabled(name)]
+
+
+def show_gamertags_ui():
+    if _focus_existing("gamertags"):
         return
 
-    acct_win = _make_settings_window("accounts", "Gaming Status Agent - Account Settings", "430x430")
+    fields = gamertag_fields()
+    # Two rows of padding plus the Save button, so the window fits its contents
+    # however many platforms are switched on.
+    height = 90 + 42 * max(len(fields), 1)
+    gt_win = _make_settings_window("gamertags", "Gaming Status Agent - Gamertags",
+                                   f"430x{height}")
 
-    fields = [
-        ("EPIC_PROFILE_NAME", "Epic Profile"),
-        ("UBISOFT_PROFILE_NAME", "Ubisoft Profile"),
-        ("GOG_PROFILE_NAME", "GOG Profile"),
-        ("BATTLENET_PROFILE_NAME", "Battle.net Profile"),
-        ("EA_PROFILE_NAME", "EA Profile"),
-        ("STEAM_PROFILE_NAME", "Steam Profile"),
-        ("XBOX_PROFILE_NAME", "Xbox Gamertag")
-    ]
-    vars_dict, row = _add_entry_rows(acct_win, fields)
+    if not fields:
+        tk.Label(gt_win, text="No tracked platform uses a gamertag.\n"
+                              "Turn one on under Platforms first.",
+                 justify="left").grid(row=0, column=0, columnspan=2,
+                                      padx=15, pady=20, sticky="w")
+        _finish_settings_window(gt_win, 1, lambda: (OPEN_WINDOWS.pop("gamertags", None),
+                                                    gt_win.destroy()))
+        return
 
-    def save_accounts():
+    vars_dict, row = _add_entry_rows(gt_win, fields)
+
+    def save_gamertags():
         for key, _ in fields:
             CONFIG[key] = vars_dict[key].get().strip()
 
@@ -2272,16 +2335,16 @@ def show_account_settings_ui():
             messagebox.showerror("Error", "Could not save settings. See gsa_debug.log for details.")
             return
 
-        messagebox.showinfo("Saved", "Account settings saved successfully.\nGaming Status Agent will now apply them.")
-        OPEN_WINDOWS.pop("accounts", None)
-        acct_win.destroy()
+        messagebox.showinfo("Saved", "Gamertags saved successfully.\nGaming Status Agent will now apply them.")
+        OPEN_WINDOWS.pop("gamertags", None)
+        gt_win.destroy()
         restart_services()
 
-    _finish_settings_window(acct_win, row, save_accounts)
+    _finish_settings_window(gt_win, row, save_gamertags)
 
 
-def open_account_settings(icon, item):
-    ROOT.after(0, show_account_settings_ui)
+def open_gamertags(icon, item):
+    ROOT.after(0, show_gamertags_ui)
 
 
 def show_platforms_ui():
@@ -2538,11 +2601,15 @@ def quit_app(icon, item):
 
 
 def create_tray_menu():
+    # visible= takes a callable, re-evaluated each time the menu is opened, so
+    # toggling a platform updates the menu without rebuilding the tray icon.
     return pystray.Menu(
         pystray.MenuItem("MQTT Settings", open_settings),
         pystray.MenuItem("Platforms", open_platforms),
-        pystray.MenuItem("Account Settings", open_account_settings),
-        pystray.MenuItem("Custom Games", open_custom_games),
+        pystray.MenuItem("Gamertags", open_gamertags,
+                         visible=lambda item: bool(gamertag_fields())),
+        pystray.MenuItem("Custom Games", open_custom_games,
+                         visible=lambda item: platform_enabled("Custom")),
         pystray.MenuItem("Run Diagnostics", open_diagnostics),
         pystray.MenuItem("Force Offline", force_offline),
         pystray.MenuItem("Quit", quit_app)
