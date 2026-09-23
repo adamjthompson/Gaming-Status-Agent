@@ -102,7 +102,7 @@ Both have an official Home Assistant integration of their own
 ([Steam](https://www.home-assistant.io/integrations/steam_online/),
 [Xbox](https://www.home-assistant.io/integrations/xbox/)) that reads your status
 from the vendor's API. Those are authoritative, cover console and remote play,
-and keep working when this PC is switched off — so Gaming Status Agent does not
+and keep working when this PC is switched off, so Gaming Status Agent does not
 switch itself on alongside them without being asked.
 
 Turn them on in **Platforms** if you want one sensor covering all PC play, or if
@@ -116,8 +116,7 @@ deliberate configuration rather than automatic detection.
 ### What Playnite does and doesn't cover
 
 Playnite hands most store games off to their own client, so those report under
-that store. Playnite gets the credit only where it genuinely owns the process —
-emulated and manually added games — and those are named from the window title,
+that store. Playnite gets the credit only where it genuinely owns the process (emulated and manually added games) and those are named from the window title,
 which for emulators is often the emulator rather than the ROM. Use a **Custom
 Games** rule to give those a proper name.
 
@@ -148,9 +147,6 @@ here because they're handy to set when deploying the same config to several PCs:
 | `ENABLE_CUSTOM` | `true` |
 | `ENABLE_STEAM` | `false` |
 | `ENABLE_XBOX` | `false` |
-
-An older `gsa_config.json` that predates these keys picks up the defaults above
-on first load, so upgrading changes nothing about what's detected.
 
 ### `CATALOG_URL`
 
@@ -194,7 +190,7 @@ costs more CPU.
 ## Troubleshooting
 
 **Start with Run Diagnostics.** It lists every visible window, the process chain
-behind it, and whether Gaming Status Agent detected it *and why not* if it didn't — then shows
+behind it, and whether Gaming Status Agent detected it *and why not* if it didn't, then shows
 which source won and what would be published. Copy to Clipboard puts the whole
 report on your clipboard for a bug report. It contains no passwords.
 
@@ -218,7 +214,7 @@ refreshes without closing Gaming Status Agent.
 ## Privacy
 
 Everything stays between this PC and your broker. Gaming Status Agent makes exactly one
-outbound internet request — fetching the Ubisoft name catalog — and sends no
+outbound internet request for fetching the Ubisoft name catalog and sends no
 telemetry.
 
 Your MQTT password is encrypted at rest with Windows DPAPI, scoped to your
@@ -307,8 +303,8 @@ GSA_VERSION = "1.1.0"
 
 `build.bat` regenerates `version_info.txt` from it on every build, so the number
 Windows shows in Task Manager can't drift from the one the app reports in its
-diagnostics and log. Don't edit `version_info.txt` by hand — it says so at the
-top. To regenerate without building: `python make_version_info.py`.
+diagnostics and log. Don't edit `version_info.txt` by hand (it says so at the
+top). To regenerate without building: `python make_version_info.py`.
 
 Use three numbers, `MAJOR.MINOR.PATCH`:
 
