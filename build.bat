@@ -1,14 +1,14 @@
 @echo off
 setlocal
  
-rem Build Ubic.exe. Safe to double-click from Explorer.
+rem Build Gaming Status Agent.exe. Safe to double-click from Explorer.
 
 rem Explorer starts batch files in C:\Windows\System32, so move to this file's
 rem own folder or every relative path below resolves against the wrong place.
 cd /d "%~dp0"
 
 echo ============================================
-echo  Building Ubic
+echo  Building Gaming Status Agent
 echo ============================================
 echo.
 
@@ -28,20 +28,20 @@ if not defined PY (
 )
 echo Interpreter: %PY%
 
-if not exist "ubic_tracker.py" (
-    echo ERROR: ubic_tracker.py not found in %CD%.
+if not exist "gsa_tracker.py" (
+    echo ERROR: gsa_tracker.py not found in %CD%.
     goto :end
 )
 
-if not exist "ubic_icon.ico" (
-    echo ERROR: ubic_icon.ico not found in %CD%.
+if not exist "gsa_icon.ico" (
+    echo ERROR: gsa_icon.ico not found in %CD%.
     echo The build references it twice and PyInstaller will refuse to start.
     goto :end
 )
 
-rem Regenerate the Windows version resource from UBIC_VERSION so the exe
+rem Regenerate the Windows version resource from GSA_VERSION so the exe
 rem metadata can never drift from what the app reports. Without it, Task
-rem Manager and Startup Apps fall back to showing "Ubic.exe".
+rem Manager and Startup Apps fall back to showing "Gaming Status Agent.exe".
 set "VERFLAG="
 if exist "make_version_info.py" (
     %PY% make_version_info.py
@@ -54,7 +54,7 @@ if exist "version_info.txt" (
     set "VERFLAG=--version-file=version_info.txt"
 ) else (
     echo WARNING: version_info.txt not found. The exe will appear as
-    echo          "Ubic.exe" rather than "Ubic" in Task Manager.
+    echo          "Gaming Status Agent.exe" rather than "Gaming Status Agent" in Task Manager.
 )
 
 %PY% -m PyInstaller --version >nul 2>&1
@@ -74,11 +74,11 @@ echo.
 %PY% -m PyInstaller --noconfirm --clean ^
     --onefile ^
     --windowed ^
-    --name Ubic ^
-    --icon=ubic_icon.ico ^
-    --add-data "ubic_icon.ico;." ^
+    --name "Gaming Status Agent" ^
+    --icon=gsa_icon.ico ^
+    --add-data "gsa_icon.ico;." ^
     %VERFLAG% ^
-    ubic_tracker.py
+    gsa_tracker.py
 
 if errorlevel 1 (
     echo.
@@ -86,18 +86,18 @@ if errorlevel 1 (
     echo  BUILD FAILED - see the output above.
     echo ============================================
     echo.
-    echo If it could not write dist\Ubic.exe, quit Ubic from its
+    echo If it could not write dist\Gaming Status Agent.exe, quit Gaming Status Agent from its
     echo tray icon first: a running exe cannot be overwritten.
     goto :end
 )
 
 echo.
 echo ============================================
-echo  Done: %CD%\dist\Ubic.exe
+echo  Done: %CD%\dist\Gaming Status Agent.exe
 echo ============================================
 echo.
-echo Copy it to a folder of its own - it writes ubic_config.json
-echo and ubic_debug.log alongside itself.
+echo Copy it to a folder of its own - it writes gsa_config.json
+echo and gsa_debug.log alongside itself.
 
 :end
 echo.

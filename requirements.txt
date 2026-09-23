@@ -1,4 +1,4 @@
-# Ubic Tracker — Windows only (uses winreg, ctypes.windll, DPAPI).
+# Gaming Status Agent — Windows only (uses winreg, ctypes.windll, DPAPI).
 # Pinned to major versions so a fresh build cannot pick up a breaking API change.
 
 paho-mqtt>=2.0,<3.0

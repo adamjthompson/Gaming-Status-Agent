@@ -1,12 +1,13 @@
-# Files Ubic writes next to itself at runtime. These contain personal data -
+# Files Gaming Status Agent writes next to itself at runtime. These contain personal data -
 # your broker address, MQTT username, encrypted password, profile names and a
 # history of what you have played - and must never be committed.
-ubic_config.json
-ubic_config.json.tmp
-ubic_debug.log
-ubic_debug.log.*
-ubic_diagnostics.txt
-ubic_ubi_ids.json
+gsa_config.json
+gsa_config.json.tmp
+gsa_debug.log
+gsa_debug.log.*
+gsa_diagnostics.txt
+gsa_ubi_ids.json
+"Gaming Status Agent.spec"
 
 # Local backups / scratch copies 
 *_backup.py

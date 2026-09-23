@@ -1,13 +1,13 @@
-"""Ubic diagnostic - command line front end.
+"""Gaming Status Agent diagnostic - command line front end.
 
 The same report is available from the tray icon under "Run Diagnostics"; this
 script is for when you would rather have it in a terminal or redirect it to a
 file. Run it on the Windows machine while a game is running:
 
-    python ubic_diagnose.py
-    python ubic_diagnose.py > report.txt
+    python gsa_diagnose.py
+    python gsa_diagnose.py > report.txt
 
-The report is built by ubic_tracker.build_diagnostic_report(), so it reflects
+The report is built by gsa_tracker.build_diagnostic_report(), so it reflects
 the real detection code rather than a second copy of it. Nothing is published
 and no files are changed. The MQTT password is never included.
 """
@@ -16,17 +16,17 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import ubic_tracker as u
+import gsa_tracker as gsa
 
 
 def main():
     # The tray app loads these at startup; a standalone run has to do it itself.
-    u.CONFIG = u.load_config()
-    u.PROFILE_SANITIZED = u.sanitize_topic_part(u.CONFIG.get("HA_DEVICE_NAME", "User"))
-    u.GOG_BY_PATH, u.GOG_BY_NAME = u.get_gog_mapping()
-    u.BATTLENET_BY_DIR = u.get_battlenet_mapping()
+    gsa.CONFIG = gsa.load_config()
+    gsa.PROFILE_SANITIZED = gsa.sanitize_topic_part(gsa.CONFIG.get("HA_DEVICE_NAME", "User"))
+    gsa.GOG_BY_PATH, gsa.GOG_BY_NAME = gsa.get_gog_mapping()
+    gsa.BATTLENET_BY_DIR = gsa.get_battlenet_mapping()
 
-    report = u.build_diagnostic_report()
+    report = gsa.build_diagnostic_report()
     try:
         print(report)
     except UnicodeEncodeError:
@@ -36,4 +36,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -22,8 +22,8 @@ from PIL import Image, ImageDraw
 import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
-# exe so Windows shows "Ubic" rather than "Ubic.exe".
-UBIC_VERSION = "1.0.0"
+# exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
+GSA_VERSION = "1.0.0"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -79,9 +79,9 @@ if getattr(sys, 'frozen', False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-CONFIG_FILE = os.path.join(BASE_DIR, "ubic_config.json")
-DEBUG_LOG_FILE = os.path.join(BASE_DIR, "ubic_debug.log")
-UBI_CACHE_FILE = os.path.join(BASE_DIR, "ubic_ubi_ids.json")
+CONFIG_FILE = os.path.join(BASE_DIR, "gsa_config.json")
+DEBUG_LOG_FILE = os.path.join(BASE_DIR, "gsa_debug.log")
+UBI_CACHE_FILE = os.path.join(BASE_DIR, "gsa_ubi_ids.json")
 LOCAL_APPDATA = os.environ.get('LOCALAPPDATA', '')
 PROGRAM_DATA = os.environ.get('PROGRAMDATA', '')
 
@@ -94,7 +94,7 @@ UBI_LOG_FILE = "launcher_log.txt"
 # networks that block raw.githubusercontent.com. Config-file only by design:
 # the common "this one game is named wrong" case is served by UBISOFT_OVERRIDES,
 # so this does not belong in front of every user in the Settings window.
-DEFAULT_CATALOG_URL = "https://raw.githubusercontent.com/adamjthompson/Ubic/main/catalog.json"
+DEFAULT_CATALOG_URL = "https://raw.githubusercontent.com/adamjthompson/Gaming-Status-Agent/main/catalog.json"
 MAX_CATALOG_BYTES = 4 * 1024 * 1024
 MAX_TITLE_LEN = 255
 MAX_ANCESTRY_DEPTH = 20
@@ -259,7 +259,7 @@ LAUNCHER_FAMILY_TOKENS = (
     "eadesktop", "eabackgroundservice", "origin"
 )
 
-# Anything descended from these is never auto-detected, so Ubic does not publish
+# Anything descended from these is never auto-detected, so Gaming Status Agent does not publish
 # a competing state for games Home Assistant already reports natively. Steam's
 # own HA integration reads the played game from the Steam Web API, and works
 # even while this machine is off. Explicit Custom Games rules still apply: those
@@ -304,7 +304,7 @@ ROOT = tk.Tk()
 ROOT.withdraw()
 
 # --- LOGGING ---
-_logger = logging.getLogger("ubic")
+_logger = logging.getLogger("gsa")
 
 
 def _init_logging():
@@ -340,11 +340,11 @@ def sanitize_topic_part(name):
 
 
 def get_state_topic():
-    return f"homeassistant/sensor/ubic_{PROFILE_SANITIZED}/state"
+    return f"homeassistant/sensor/gsa_{PROFILE_SANITIZED}/state"
 
 
 def get_config_topic():
-    return f"homeassistant/sensor/ubic_{PROFILE_SANITIZED}/config"
+    return f"homeassistant/sensor/gsa_{PROFILE_SANITIZED}/config"
 
 
 # --- CREDENTIAL STORAGE (Windows DPAPI via ctypes, no extra dependency) ---
@@ -728,7 +728,7 @@ def get_ubisoft_info():
     try:
         req = urllib.request.Request(
             catalog_url,
-            headers={'User-Agent': 'Ubic-Tracker/1.0'}
+            headers={'User-Agent': 'Gaming-Status-Agent/1.0'}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             # Bounded read: never pull an unbounded remote body into memory.
@@ -758,7 +758,7 @@ def get_ubisoft_info():
 
     # 2. Add Windows Uninstall Registry as a backup.
     # start_services() calls this function unprotected, so a registry surprise
-    # here must never prevent Ubic from starting.
+    # here must never prevent Gaming Status Agent from starting.
     try:
         reg_names, unmatched = get_ubisoft_registry_names()
     except Exception as e:
@@ -1363,7 +1363,7 @@ def build_diagnostic_report():
         out.append(title)
         out.append(line)
 
-    out.append(f"Ubic {UBIC_VERSION} diagnostics - "
+    out.append(f"Gaming Status Agent {GSA_VERSION} diagnostics - "
                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     section("CONFIGURATION")
@@ -1518,7 +1518,7 @@ def build_diagnostic_report():
 
     if unknown:
         out.append("")
-        out.append("  UNRECOGNISED processes are unknown to Ubic. Only a process that")
+        out.append("  UNRECOGNISED processes are unknown to Gaming Status Agent. Only a process that")
         out.append("  actually STARTS games belongs in the launcher list; browser and")
         out.append("  service helpers should be ignored instead.")
 
@@ -1538,15 +1538,15 @@ def setup_mqtt_discovery(mqtt_client):
     config_payload = {
         "name": None,
         "has_entity_name": True,
-        "default_entity_id": f"sensor.ubic_{PROFILE_SANITIZED}",
+        "default_entity_id": f"sensor.gsa_{PROFILE_SANITIZED}",
         "state_topic": get_state_topic(),
         "value_template": "{{ value_json['Game Title'] }}",
         "json_attributes_topic": get_state_topic(),
-        "unique_id": f"ubic_{PROFILE_SANITIZED}",
+        "unique_id": f"gsa_{PROFILE_SANITIZED}",
         "device": {
-            "identifiers": [f"ubic_client_{PROFILE_SANITIZED}"],
-            "name": f"Ubic {device_name}",
-            "manufacturer": "Ubic Tracker"
+            "identifiers": [f"gsa_client_{PROFILE_SANITIZED}"],
+            "name": f"Gaming Status Agent {device_name}",
+            "manufacturer": "Gaming Status Agent"
         },
         "icon": "mdi:controller"
     }
@@ -1624,7 +1624,7 @@ def stop_services():
 def start_services():
     global client, observer, custom_tracker, CONFIG, PROFILE_SANITIZED
     global GOG_BY_PATH, GOG_BY_NAME, BATTLENET_BY_DIR
-    debug_log("Starting Ubic services...")
+    debug_log("Starting Gaming Status Agent services...")
 
     CONFIG = load_config()
     PROFILE_SANITIZED = sanitize_topic_part(CONFIG.get("HA_DEVICE_NAME", "User"))
@@ -1682,7 +1682,7 @@ def start_services():
         debug_log(f"Could not start log observer: {e}")
 
     # Refreshed on every restart, so newly installed games appear after a
-    # Save & Apply rather than needing Ubic to be closed and reopened.
+    # Save & Apply rather than needing Gaming Status Agent to be closed and reopened.
     GOG_BY_PATH, GOG_BY_NAME = get_gog_mapping()
     BATTLENET_BY_DIR = get_battlenet_mapping()
 
@@ -1705,12 +1705,12 @@ def check_initial_config():
         save_config(DEFAULT_CONFIG)
         CONFIG = load_config()
         messagebox.showinfo(
-            "Ubic First Run",
+            "Gaming Status Agent First Run",
             f"A default configuration has been created.\n\n"
             f"Device name: {CONFIG.get('HA_DEVICE_NAME')}\n"
             f"This becomes your Home Assistant sensor "
-            f"(sensor.ubic_{sanitize_topic_part(CONFIG.get('HA_DEVICE_NAME', ''))}).\n\n"
-            f"Ubic is now running in your System Tray. Right-click the icon to set "
+            f"(sensor.gsa_{sanitize_topic_part(CONFIG.get('HA_DEVICE_NAME', ''))}).\n\n"
+            f"Gaming Status Agent is now running in your System Tray. Right-click the icon to set "
             f"your MQTT broker, change the device name, or add Custom Games."
         )
     else:
@@ -1768,7 +1768,7 @@ def show_settings_ui():
     if _focus_existing("settings"):
         return
 
-    settings_win = _make_settings_window("settings", "Ubic - MQTT Settings", "430x400")
+    settings_win = _make_settings_window("settings", "Gaming Status Agent - MQTT Settings", "430x400")
 
     fields = [
         ("HA_DEVICE_NAME", "HA Device Name"),
@@ -1803,10 +1803,10 @@ def show_settings_ui():
         CONFIG["MQTT_CA_CERT"] = ca_var.get().strip()
 
         if not save_config():
-            messagebox.showerror("Error", "Could not save settings. See ubic_debug.log for details.")
+            messagebox.showerror("Error", "Could not save settings. See gsa_debug.log for details.")
             return
 
-        messagebox.showinfo("Saved", "Settings saved successfully.\nUbic will now apply them.")
+        messagebox.showinfo("Saved", "Settings saved successfully.\nGaming Status Agent will now apply them.")
         OPEN_WINDOWS.pop("settings", None)
         settings_win.destroy()
         restart_services()
@@ -1822,7 +1822,7 @@ def show_account_settings_ui():
     if _focus_existing("accounts"):
         return
 
-    acct_win = _make_settings_window("accounts", "Ubic - Account Settings", "430x310")
+    acct_win = _make_settings_window("accounts", "Gaming Status Agent - Account Settings", "430x310")
 
     fields = [
         ("EPIC_PROFILE_NAME", "Epic Profile"),
@@ -1838,10 +1838,10 @@ def show_account_settings_ui():
             CONFIG[key] = vars_dict[key].get().strip()
 
         if not save_config():
-            messagebox.showerror("Error", "Could not save settings. See ubic_debug.log for details.")
+            messagebox.showerror("Error", "Could not save settings. See gsa_debug.log for details.")
             return
 
-        messagebox.showinfo("Saved", "Account settings saved successfully.\nUbic will now apply them.")
+        messagebox.showinfo("Saved", "Account settings saved successfully.\nGaming Status Agent will now apply them.")
         OPEN_WINDOWS.pop("accounts", None)
         acct_win.destroy()
         restart_services()
@@ -1859,7 +1859,7 @@ def show_custom_games_ui():
 
     cg_win = tk.Toplevel(ROOT)
     OPEN_WINDOWS["custom_games"] = cg_win
-    cg_win.title("Ubic - Custom Games")
+    cg_win.title("Gaming Status Agent - Custom Games")
     cg_win.geometry("540x350")
     cg_win.attributes('-topmost', True)
     cg_win.protocol("WM_DELETE_WINDOW",
@@ -1929,7 +1929,7 @@ def show_custom_games_ui():
                 "match": m
             })
             if not save_config():
-                messagebox.showerror("Error", "Could not save. See ubic_debug.log for details.")
+                messagebox.showerror("Error", "Could not save. See gsa_debug.log for details.")
                 return
 
             refresh_list()
@@ -1953,7 +1953,7 @@ def show_custom_games_ui():
         ]
 
         if not save_config():
-            messagebox.showerror("Error", "Could not save. See ubic_debug.log for details.")
+            messagebox.showerror("Error", "Could not save. See gsa_debug.log for details.")
             return
 
         refresh_list()
@@ -1978,7 +1978,7 @@ def show_diagnostics_ui():
 
     diag_win = tk.Toplevel(ROOT)
     OPEN_WINDOWS["diagnostics"] = diag_win
-    diag_win.title("Ubic - Diagnostics")
+    diag_win.title("Gaming Status Agent - Diagnostics")
     diag_win.geometry("860x600")
     diag_win.protocol("WM_DELETE_WINDOW",
                       lambda: (OPEN_WINDOWS.pop("diagnostics", None), diag_win.destroy()))
@@ -2026,7 +2026,7 @@ def show_diagnostics_ui():
             status.config(text=f"Could not copy: {e}")
 
     def save_report():
-        path = os.path.join(BASE_DIR, "ubic_diagnostics.txt")
+        path = os.path.join(BASE_DIR, "gsa_diagnostics.txt")
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text.get("1.0", tk.END))
@@ -2077,7 +2077,7 @@ def create_tray_menu():
 
 
 def create_image():
-    icon_path = resource_path("ubic_icon.ico")
+    icon_path = resource_path("gsa_icon.ico")
     if os.path.exists(icon_path):
         try:
             with Image.open(icon_path) as img:
@@ -2094,7 +2094,7 @@ def create_image():
 
 
 def apply_window_icon():
-    """Replace Tk's default feather on every Ubic window.
+    """Replace Tk's default feather on every Gaming Status Agent window.
 
     Nothing set an icon on the Tk side, so Settings, Custom Games and
     Diagnostics all showed the Tcl/Tk logo. iconbitmap(default=...) applies to
@@ -2104,7 +2104,7 @@ def apply_window_icon():
     a missing file should not put the feather back.
     """
     global _WINDOW_ICON
-    icon_path = resource_path("ubic_icon.ico")
+    icon_path = resource_path("gsa_icon.ico")
     if os.path.exists(icon_path):
         try:
             ROOT.iconbitmap(default=icon_path)
@@ -2123,11 +2123,11 @@ def apply_window_icon():
 
 def main():
     _init_logging()
-    debug_log(f"=== UBIC {UBIC_VERSION} LAUNCHED ===")
+    debug_log(f"=== GAMING STATUS AGENT {GSA_VERSION} LAUNCHED ===")
     apply_window_icon()
     check_initial_config()
     start_services()
-    icon = pystray.Icon("Ubic", create_image(), "Ubic Gaming Tracker", create_tray_menu())
+    icon = pystray.Icon("Gaming Status Agent", create_image(), "Gaming Status Agent", create_tray_menu())
 
     threading.Thread(target=icon.run, daemon=True).start()
     ROOT.mainloop()
