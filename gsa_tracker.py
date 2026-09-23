@@ -231,6 +231,11 @@ def platform_enabled(launcher_name):
     return bool(CONFIG.get(key, DEFAULT_CONFIG.get(key, True)))
 
 
+def _clean_name(value):
+    """A trimmed string, or "" for anything blank or not a string."""
+    return value.strip() if isinstance(value, str) else ""
+
+
 def profile_for_launcher(launcher_name):
     """Account name to publish for this launcher.
 
@@ -238,11 +243,17 @@ def profile_for_launcher(launcher_name):
     profile independently and drifted apart, so the reconnect path published the
     device name where the normal path published the gamertag.
 
-    Falls back to the device name when the launcher has no profile of its own,
-    or when its field is blank, rather than publishing an empty string.
+    Falls back to the device name when the launcher has no gamertag of its own,
+    or when its field is blank, rather than publishing an empty string. Each
+    candidate is trimmed first: a whitespace-only value is truthy, so a
+    hand-edited "   " used to be published verbatim as the profile.
+
+    "Unknown" is the last resort. It is reachable only from a config whose
+    device name is blank, which load_config repairs, so it should never be seen.
     """
     key = LAUNCHER_PROFILE_KEYS.get(launcher_name)
-    return (CONFIG.get(key) if key else "") or CONFIG.get("HA_DEVICE_NAME", "Unknown")
+    gamertag = _clean_name(CONFIG.get(key)) if key else ""
+    return gamertag or _clean_name(CONFIG.get("HA_DEVICE_NAME")) or "Unknown"
 
 
 EPIC_APP_RE = re.compile(r'-epicapp=(\w+)')
@@ -506,6 +517,16 @@ def load_config():
 
     merged = dict(DEFAULT_CONFIG)
     merged.update(data)
+
+    # The device name is the MQTT topic, the entity id and the fallback profile.
+    # Blank, whitespace or a non-string silently produced an empty Profile Name
+    # and moved the sensor to the generic sensor.gsa_user topic, so it is
+    # repaired here rather than being allowed downstream.
+    device_name = _clean_name(merged.get("HA_DEVICE_NAME"))
+    if not device_name:
+        device_name = DEFAULT_CONFIG["HA_DEVICE_NAME"]
+        debug_log(f"HA_DEVICE_NAME is blank; falling back to {device_name!r}.")
+    merged["HA_DEVICE_NAME"] = device_name
 
     merged["MQTT_PORT"] = _coerce_int(merged.get("MQTT_PORT"), 1883, 1, 65535)
     merged["POLL_INTERVAL"] = _coerce_int(merged.get("POLL_INTERVAL"), 5, 1, 3600)
@@ -2267,12 +2288,26 @@ def show_settings_ui():
     row += 1
 
     def save_settings():
+        # Checked before anything is written: clearing this field moved the
+        # sensor to the generic sensor.gsa_user topic and emptied Profile Name,
+        # with no indication that either had happened.
+        if not _clean_name(vars_dict["HA_DEVICE_NAME"].get()):
+            messagebox.showerror(
+                "Error",
+                "HA Device Name cannot be empty.\n\n"
+                "It becomes your Home Assistant sensor name and the MQTT topic.")
+            return
+
         for key, _ in fields:
             val = vars_dict[key].get()
             if key == "MQTT_PORT":
                 val = _coerce_int(val, 1883, 1, 65535)
             elif key == "POLL_INTERVAL":
                 val = _coerce_int(val, 5, 1, 3600)
+            elif key in ("HA_DEVICE_NAME", "MQTT_BROKER", "MQTT_USER"):
+                # A trailing space in the broker address fails to connect with
+                # a DNS error that gives no hint of the real cause.
+                val = _clean_name(val)
             CONFIG[key] = val
 
         CONFIG["MQTT_TLS"] = bool(tls_var.get())
