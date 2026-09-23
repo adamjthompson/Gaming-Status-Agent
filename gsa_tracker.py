@@ -154,6 +154,7 @@ DEFAULT_CONFIG = {
     "BATTLENET_PROFILE_NAME": "",
     "EA_PROFILE_NAME": "",
     "STEAM_PROFILE_NAME": "",
+    "XBOX_PROFILE_NAME": "",
     # Per-platform switches, all editable from the tray under "Platforms".
     # Everything that shipped before toggles existed defaults to on, so an
     # upgrade changes nothing. Steam and Xbox default to off: each has an
@@ -185,17 +186,19 @@ DEFAULT_CONFIG = {
 }
 
 # A launcher gets its own profile name only where the service has a distinct
-# public identity. Omitted on purpose: Amazon Games, because the account is a
-# plain Amazon login with no gamertag; Xbox, because the local package data this
-# agent reads carries no gamertag; Playnite and Custom, because they are local
-# with no account at all. Anything unlisted falls back to HA_DEVICE_NAME.
+# public identity. Steam and Xbox are detected from local data that carries no
+# gamertag, so the field is the only way to publish one. Omitted on purpose:
+# Amazon Games, because the account is a plain Amazon login with no gamertag;
+# Playnite and Custom, because they are local with no account at all. Anything
+# unlisted falls back to HA_DEVICE_NAME.
 LAUNCHER_PROFILE_KEYS = {
     "Epic": "EPIC_PROFILE_NAME",
     "Ubisoft": "UBISOFT_PROFILE_NAME",
     "GOG": "GOG_PROFILE_NAME",
     "Battle.net": "BATTLENET_PROFILE_NAME",
     "EA": "EA_PROFILE_NAME",
-    "Steam": "STEAM_PROFILE_NAME"
+    "Steam": "STEAM_PROFILE_NAME",
+    "Xbox": "XBOX_PROFILE_NAME"
 }
 
 # Launcher label -> the config key that switches it on. Every detector consults
@@ -2248,7 +2251,7 @@ def show_account_settings_ui():
     if _focus_existing("accounts"):
         return
 
-    acct_win = _make_settings_window("accounts", "Gaming Status Agent - Account Settings", "430x360")
+    acct_win = _make_settings_window("accounts", "Gaming Status Agent - Account Settings", "430x430")
 
     fields = [
         ("EPIC_PROFILE_NAME", "Epic Profile"),
@@ -2256,7 +2259,8 @@ def show_account_settings_ui():
         ("GOG_PROFILE_NAME", "GOG Profile"),
         ("BATTLENET_PROFILE_NAME", "Battle.net Profile"),
         ("EA_PROFILE_NAME", "EA Profile"),
-        ("STEAM_PROFILE_NAME", "Steam Profile")
+        ("STEAM_PROFILE_NAME", "Steam Profile"),
+        ("XBOX_PROFILE_NAME", "Xbox Gamertag")
     ]
     vars_dict, row = _add_entry_rows(acct_win, fields)
 
@@ -2280,19 +2284,11 @@ def open_account_settings(icon, item):
     ROOT.after(0, show_account_settings_ui)
 
 
-# Shown under each platform's checkbox where the choice is not obvious.
-PLATFORM_NOTES = {
-    "Steam": "Home Assistant has its own Steam integration",
-    "Xbox": "Home Assistant has its own Xbox integration",
-    "Custom": "your own rules, from the Custom Games window"
-}
-
-
 def show_platforms_ui():
     if _focus_existing("platforms"):
         return
 
-    plat_win = _make_settings_window("platforms", "Gaming Status Agent - Platforms", "430x470")
+    plat_win = _make_settings_window("platforms", "Gaming Status Agent - Platforms", "430x360")
 
     tk.Label(plat_win, text="Which platforms should be tracked?",
              font=("", 9, "bold")).grid(row=0, column=0, columnspan=2,
@@ -2307,12 +2303,6 @@ def show_platforms_ui():
         tk.Checkbutton(plat_win, text=label, variable=var).grid(
             row=row, column=0, columnspan=2, padx=15, sticky="w")
         row += 1
-
-        note = PLATFORM_NOTES.get(label)
-        if note:
-            tk.Label(plat_win, text=note, fg="gray40").grid(
-                row=row, column=0, columnspan=2, padx=38, sticky="w")
-            row += 1
 
     def save_platforms():
         for key, var in vars_dict.items():
