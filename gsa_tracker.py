@@ -2317,7 +2317,6 @@ def show_settings_ui():
             messagebox.showerror("Error", "Could not save settings. See gsa_debug.log for details.")
             return
 
-        messagebox.showinfo("Saved", "Settings saved successfully.\nGaming Status Agent will now apply them.")
         OPEN_WINDOWS.pop("settings", None)
         settings_win.destroy()
         restart_services()
@@ -2370,7 +2369,6 @@ def show_gamertags_ui():
             messagebox.showerror("Error", "Could not save settings. See gsa_debug.log for details.")
             return
 
-        messagebox.showinfo("Saved", "Gamertags saved successfully.\nGaming Status Agent will now apply them.")
         OPEN_WINDOWS.pop("gamertags", None)
         gt_win.destroy()
         restart_services()
@@ -2410,8 +2408,6 @@ def show_platforms_ui():
             messagebox.showerror("Error", "Could not save settings. See gsa_debug.log for details.")
             return
 
-        messagebox.showinfo("Saved", "Platform settings saved successfully.\n"
-                                     "Gaming Status Agent will now apply them.")
         OPEN_WINDOWS.pop("platforms", None)
         plat_win.destroy()
         restart_services()
