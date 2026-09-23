@@ -21,10 +21,30 @@ import gsa_tracker as gsa
 
 def main():
     # The tray app loads these at startup; a standalone run has to do it itself.
+    # rebuild_active_tables() in particular: without it the ancestry scan reads
+    # an empty launcher table and the report says nothing is detected.
     gsa.CONFIG = gsa.load_config()
     gsa.PROFILE_SANITIZED = gsa.sanitize_topic_part(gsa.CONFIG.get("HA_DEVICE_NAME", "User"))
-    gsa.GOG_BY_PATH, gsa.GOG_BY_NAME = gsa.get_gog_mapping()
-    gsa.BATTLENET_BY_DIR = gsa.get_battlenet_mapping()
+    gsa.rebuild_active_tables()
+
+    # Each scan is skipped when its platform is off, matching start_services(),
+    # so the report shows what the running agent would actually see.
+    if gsa.platform_enabled("GOG"):
+        gsa.GOG_BY_PATH, gsa.GOG_BY_NAME = gsa.get_gog_mapping()
+    if gsa.platform_enabled("Battle.net"):
+        gsa.BATTLENET_BY_DIR = gsa.get_battlenet_mapping()
+    if gsa.platform_enabled("Steam"):
+        gsa.STEAM_BY_DIR, gsa.STEAM_BY_APPID = gsa.get_steam_mapping()
+    if gsa.platform_enabled("Xbox"):
+        gsa.XBOX_BY_DIR = gsa.get_xbox_mapping()
+
+    # Ubisoft's id -> name map lives inside the log handler at runtime, but the
+    # registry scan behind it fills the counts the report prints.
+    if gsa.platform_enabled("Ubisoft"):
+        try:
+            gsa.get_ubisoft_info()
+        except Exception as e:
+            print(f"(Ubisoft catalog/registry scan failed: {e})")
 
     report = gsa.build_diagnostic_report()
     try:

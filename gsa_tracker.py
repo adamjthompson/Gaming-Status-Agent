@@ -23,7 +23,7 @@ import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.0.0"
+GSA_VERSION = "1.1.0"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -68,6 +68,28 @@ GOG_BY_NAME = {}
 # Installed Battle.net games: normalised install directory (with trailing
 # separator) -> game name. Any process running from inside one is that game.
 BATTLENET_BY_DIR = {}
+
+# Installed Steam games, read from the .acf manifests at startup:
+# STEAM_BY_DIR maps a normalised steamapps\common install directory -> name;
+# STEAM_BY_APPID maps the appid string -> name, which is what the running-appid
+# registry signal resolves through.
+STEAM_BY_DIR = {}
+STEAM_BY_APPID = {}
+
+# Installed Xbox / Microsoft Store games: normalised package root -> name.
+XBOX_BY_DIR = {}
+
+# Rebuilt by start_services() from the ENABLE_* toggles. The static LAUNCHERS
+# and EXCLUDED_ANCESTOR_EXES tables stay as written; these are what the
+# ancestry scan actually consults, so turning a platform off takes effect on
+# the next Save & Apply without editing any table.
+ACTIVE_LAUNCHERS = {}
+ACTIVE_EXCLUSIONS = set()
+
+# Filled in by the Steam and Xbox scans so diagnostics can show whether they
+# found anything, and where they looked.
+STEAM_SCAN_INFO = {"root": "", "libraries": [], "games": 0}
+XBOX_SCAN_INFO = {"packages": 0, "games": 0, "unnamed": 0}
 
 # Filled in by get_ubisoft_info() so diagnostics can show whether the Ubisoft
 # registry fallback actually found anything. It previously failed silently.
@@ -131,6 +153,23 @@ DEFAULT_CONFIG = {
     "GOG_PROFILE_NAME": "",
     "BATTLENET_PROFILE_NAME": "",
     "EA_PROFILE_NAME": "",
+    "STEAM_PROFILE_NAME": "",
+    # Per-platform switches, all editable from the tray under "Platforms".
+    # Everything that shipped before toggles existed defaults to on, so an
+    # upgrade changes nothing. Steam and Xbox default to off: each has an
+    # official Home Assistant integration of its own, and turning them on here
+    # without asking would silently publish a second, competing source for the
+    # same play session.
+    "ENABLE_EPIC": True,
+    "ENABLE_UBISOFT": True,
+    "ENABLE_GOG": True,
+    "ENABLE_BATTLENET": True,
+    "ENABLE_EA": True,
+    "ENABLE_AMAZON": True,
+    "ENABLE_PLAYNITE": True,
+    "ENABLE_CUSTOM": True,
+    "ENABLE_STEAM": False,
+    "ENABLE_XBOX": False,
     "MQTT_BROKER": "192.168.1.xxx",
     "MQTT_PORT": 1883,
     # Blank so a broker that allows anonymous access connects on first run.
@@ -146,19 +185,46 @@ DEFAULT_CONFIG = {
 }
 
 # A launcher gets its own profile name only where the service has a distinct
-# public identity that Home Assistant cannot report itself. Omitted on purpose:
-# Steam, because HA's own integration reads the played game from the Steam Web
-# API and would be a better source than anything typed here; Amazon Games,
-# because the account is a plain Amazon login with no gamertag; Playnite and
-# Custom, because they are local with no account at all. Anything unlisted
-# falls back to HA_DEVICE_NAME.
+# public identity. Omitted on purpose: Amazon Games, because the account is a
+# plain Amazon login with no gamertag; Xbox, because the local package data this
+# agent reads carries no gamertag; Playnite and Custom, because they are local
+# with no account at all. Anything unlisted falls back to HA_DEVICE_NAME.
 LAUNCHER_PROFILE_KEYS = {
     "Epic": "EPIC_PROFILE_NAME",
     "Ubisoft": "UBISOFT_PROFILE_NAME",
     "GOG": "GOG_PROFILE_NAME",
     "Battle.net": "BATTLENET_PROFILE_NAME",
-    "EA": "EA_PROFILE_NAME"
+    "EA": "EA_PROFILE_NAME",
+    "Steam": "STEAM_PROFILE_NAME"
 }
+
+# Launcher label -> the config key that switches it on. Every detector consults
+# this through platform_enabled(); a label missing from here is always on.
+PLATFORM_ENABLE_KEYS = {
+    "Epic": "ENABLE_EPIC",
+    "Ubisoft": "ENABLE_UBISOFT",
+    "GOG": "ENABLE_GOG",
+    "Battle.net": "ENABLE_BATTLENET",
+    "EA": "ENABLE_EA",
+    "Amazon Games": "ENABLE_AMAZON",
+    "Playnite": "ENABLE_PLAYNITE",
+    "Steam": "ENABLE_STEAM",
+    "Xbox": "ENABLE_XBOX",
+    "Custom": "ENABLE_CUSTOM"
+}
+
+# Order shown in the Platforms window, and the order the poller tries sources in.
+PLATFORM_ORDER = ("Epic", "Steam", "GOG", "Battle.net", "Xbox",
+                  "Ubisoft", "EA", "Amazon Games", "Playnite", "Custom")
+
+
+def platform_enabled(launcher_name):
+    """True if this platform is switched on. Unknown labels are always on, so a
+    detector added without a toggle keeps working rather than silently dying."""
+    key = PLATFORM_ENABLE_KEYS.get(launcher_name)
+    if not key:
+        return True
+    return bool(CONFIG.get(key, DEFAULT_CONFIG.get(key, True)))
 
 
 def profile_for_launcher(launcher_name):
@@ -217,7 +283,13 @@ IGNORE_EXES = {
     "amazon games.exe", "amazon games ui.exe", "amazon games services.exe",
     "playnite.desktopapp.exe", "playnite.fullscreenapp.exe",
     "playnite.browserprocess.exe",
-    "overlay64.exe", "gameoverlayui.exe"
+    "overlay64.exe", "gameoverlayui.exe",
+    # Xbox / Microsoft Store shell and service processes. gamelaunchhelper.exe
+    # matters most: it lives inside the game's own package folder, so without
+    # this it would be published as the game by the install-directory match.
+    "gamelaunchhelper.exe", "gamingservices.exe", "gamingservicesnet.exe",
+    "gamebar.exe", "gamebarftserver.exe", "gamebarpresencewriter.exe",
+    "xboxpcapp.exe", "xbox.exe", "xboxpcappft.exe", "gameinputsvc.exe"
 }
 
 # Executable names too generic to identify a game on their own. A GOG title
@@ -256,14 +328,17 @@ LAUNCHER_FAMILY_TOKENS = (
     "playnite", "amazon games", "epicgames", "epicwebhelper",
     "galaxyclient", "galaxycommunication", "galaxyoverlay", "gog galaxy",
     "battle.net", "blizzard", "steam", "ubisoft", "uplay", "upc.exe",
-    "eadesktop", "eabackgroundservice", "origin"
+    "eadesktop", "eabackgroundservice", "origin",
+    "xbox", "gamingservices", "gamelaunchhelper", "gamebar"
 )
 
-# Anything descended from these is never auto-detected, so Gaming Status Agent does not publish
-# a competing state for games Home Assistant already reports natively. Steam's
-# own HA integration reads the played game from the Steam Web API, and works
-# even while this machine is off. Explicit Custom Games rules still apply: those
-# are deliberate user configuration, not automatic detection.
+# Anything descended from these is never auto-detected while its platform is
+# switched off, so Gaming Status Agent does not publish a competing state for
+# games Home Assistant may already report natively. Steam's own HA integration
+# reads the played game from the Steam Web API and works even while this machine
+# is off. Enabling Steam clears this (see ACTIVE_EXCLUSIONS). Explicit Custom
+# Games rules always apply: those are deliberate user configuration, not
+# automatic detection.
 EXCLUDED_ANCESTOR_EXES = {"steam.exe"}
 
 BROWSER_SUFFIXES = (
@@ -431,6 +506,14 @@ def load_config():
     merged["MQTT_PORT"] = _coerce_int(merged.get("MQTT_PORT"), 1883, 1, 65535)
     merged["POLL_INTERVAL"] = _coerce_int(merged.get("POLL_INTERVAL"), 5, 1, 3600)
     merged["MQTT_TLS"] = bool(merged.get("MQTT_TLS"))
+
+    # A hand-edited config can carry "false" or 0 here; bool("false") is True,
+    # so the string forms are resolved before coercing.
+    for enable_key in PLATFORM_ENABLE_KEYS.values():
+        raw = merged.get(enable_key, DEFAULT_CONFIG[enable_key])
+        if isinstance(raw, str):
+            raw = raw.strip().lower() not in ("", "0", "false", "no", "off")
+        merged[enable_key] = bool(raw)
     merged["MQTT_PASS"] = decrypt_secret(merged.get("MQTT_PASS", ""))
 
     # Only http(s) is fetchable here. Anything else - file://, ftp://, a bare
@@ -648,6 +731,241 @@ def find_gog_game(processes):
         if exe_name in GOG_BY_NAME:
             return GOG_BY_NAME[exe_name]
     return None
+
+
+# Steam's client registry. RunningAppID is the appid of the game Steam believes
+# is running right now, and 0 when none is. Apps\<id>\Running is the per-game
+# form of the same thing, and those keys also carry the display Name.
+STEAM_REG_PATH = r"Software\Valve\Steam"
+STEAM_APPS_REG_PATH = r"Software\Valve\Steam\Apps"
+
+# libraryfolders.vdf and the .acf manifests are Valve's KeyValues format. Every
+# field this needs is a flat "key" "value" pair, so a line regex reads them
+# without pulling in a VDF parser. Nested blocks are simply not matched.
+VDF_PAIR_RE = re.compile(r'^\s*"([^"]+)"\s+"([^"]*)"\s*$')
+
+# Microsoft writes one subkey per installed package here, readable by the
+# signed-in user. Program Files\WindowsApps itself is ACL-locked and cannot be
+# listed without elevation, so this is how installed Store games are found.
+APPMODEL_REG_PATH = (r"Software\Classes\Local Settings\Software\Microsoft"
+                     r"\Windows\CurrentVersion\AppModel\Repository\Packages")
+
+# Files that mark a package as a game rather than an ordinary Store app.
+# MicrosoftGame.config is the GDK game manifest; gamelaunchhelper.exe is the
+# shim every Game Pass PC title is launched through.
+XBOX_GAME_MARKERS = ("MicrosoftGame.config", "gamelaunchhelper.exe")
+
+# Store packages live under a folder named exactly this.
+WINDOWS_APPS_DIR_NAME = "windowsapps"
+
+
+def _read_vdf_pairs(path):
+    """Yield (key_lowercase, value) for every flat pair in a KeyValues file."""
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            for raw_line in f:
+                match = VDF_PAIR_RE.match(raw_line)
+                if match:
+                    yield match.group(1).lower(), match.group(2)
+    except OSError:
+        return
+
+
+def get_steam_library_paths(steam_root):
+    """Every Steam library folder on this machine, including the default one.
+
+    Games are routinely installed to a second drive, so reading only the Steam
+    install folder would miss most of a large collection.
+    """
+    libraries = []
+    seen = set()
+
+    def add(path):
+        if not path:
+            return
+        try:
+            resolved = os.path.normcase(os.path.abspath(path))
+        except Exception:
+            return
+        if resolved not in seen and os.path.isdir(resolved):
+            seen.add(resolved)
+            libraries.append(path)
+
+    add(steam_root)
+    vdf_path = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
+    # In the current format each library is a block with its own "path"; the
+    # older format numbered them "1", "2" and so on with the path as the value.
+    for key, value in _read_vdf_pairs(vdf_path):
+        if key == "path" or key.isdigit():
+            add(value.replace("\\\\", "\\"))
+    return libraries
+
+
+def get_steam_mapping():
+    """Map installed Steam games from the .acf manifests Steam writes per game.
+
+    Returns (by_dir, by_appid). Reading the manifests rather than the Steam Web
+    API means no API key, no internet and no public profile is needed, and a
+    game is named correctly the moment it is installed.
+    """
+    by_dir, by_appid = {}, {}
+    STEAM_SCAN_INFO.update({"root": "", "libraries": [], "games": 0})
+
+    steam_root = ""
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, STEAM_REG_PATH) as key:
+                steam_root = _reg_value(key, "SteamPath") or _reg_value(key, "InstallPath")
+        except OSError:
+            continue
+        if steam_root:
+            break
+
+    if not steam_root or not os.path.isdir(steam_root):
+        debug_log("Steam does not appear to be installed; skipping its game scan.")
+        return by_dir, by_appid
+
+    STEAM_SCAN_INFO["root"] = steam_root
+    libraries = get_steam_library_paths(steam_root)
+    STEAM_SCAN_INFO["libraries"] = list(libraries)
+
+    for library in libraries:
+        steamapps = os.path.join(library, "steamapps")
+        try:
+            filenames = os.listdir(steamapps)
+        except OSError:
+            continue
+
+        for filename in filenames:
+            if not (filename.startswith("appmanifest_") and filename.endswith(".acf")):
+                continue
+            fields = dict(_read_vdf_pairs(os.path.join(steamapps, filename)))
+            appid = fields.get("appid", "").strip()
+            name = fields.get("name", "").strip()
+            install_dir = fields.get("installdir", "").strip()
+            if not name:
+                continue
+
+            name = name[:MAX_TITLE_LEN]
+            if appid:
+                by_appid[appid] = name
+            if install_dir:
+                by_dir[_normalised_dir(os.path.join(steamapps, "common", install_dir))] = name
+
+    STEAM_SCAN_INFO["games"] = len(by_appid) or len(by_dir)
+    debug_log(f"Found {len(by_appid)} installed Steam games across "
+              f"{len(libraries)} librar{'y' if len(libraries) == 1 else 'ies'}.")
+    return by_dir, by_appid
+
+
+def find_steam_running_game():
+    """Name of the Steam game Steam itself reports as running, or None.
+
+    This is the authoritative signal: it is what Steam tells its own overlay and
+    friends list, so it is right even for a game started from a desktop shortcut
+    or installed outside steamapps\\common.
+    """
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STEAM_REG_PATH) as key:
+            running_appid = str(_reg_value(key, "RunningAppID") or "0").strip()
+    except OSError:
+        running_appid = "0"
+
+    if running_appid and running_appid != "0":
+        return STEAM_BY_APPID.get(running_appid) or f"Steam App {running_appid}"
+
+    # RunningAppID is not written by every client build, so fall back to the
+    # per-game Running flag. These keys also carry the name, which covers a
+    # game that has no manifest in any library we could read.
+    for appid, sub in _enum_subkeys(winreg.HKEY_CURRENT_USER, STEAM_APPS_REG_PATH):
+        try:
+            if _reg_value(sub, "Running") not in ("1", "True"):
+                continue
+            name = _reg_value(sub, "Name") or STEAM_BY_APPID.get(appid.strip())
+            if name:
+                return name[:MAX_TITLE_LEN]
+            return f"Steam App {appid.strip()}"
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_indirect_string(value):
+    """Resolve an @{PackageFullName?ms-resource://...} display name.
+
+    Store packages usually store a localised resource reference rather than the
+    literal title, so publishing DisplayName unresolved would put the raw
+    ms-resource URI on the sensor.
+    """
+    if not value.startswith("@{"):
+        return value
+    try:
+        buffer = ctypes.create_unicode_buffer(1024)
+        result = ctypes.windll.shlwapi.SHLoadIndirectString(
+            ctypes.c_wchar_p(value), buffer, len(buffer), None)
+        if result == 0 and buffer.value.strip():
+            return buffer.value.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _package_family_title(package_full_name):
+    """Last-resort title from a package name: 'Publisher.SomeGame_1.0_x64__hash'
+    becomes 'SomeGame'. Better on the sensor than a raw package identifier."""
+    stem = package_full_name.split("_")[0]
+    leaf = stem.split(".")[-1] if "." in stem else stem
+    spaced = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', ' ', leaf).strip()
+    return (spaced or leaf)[:MAX_TITLE_LEN]
+
+
+def get_xbox_mapping():
+    """Map installed Xbox / Microsoft Store games to their package folders.
+
+    Returns {normalised package root -> game name}, in the same shape as the
+    Battle.net map so find_game_by_install_dir() can consume it unchanged.
+
+    Only packages carrying a game marker file are kept, which is what stops
+    Calculator, Photos and every other Store app from being reported as a game.
+    """
+    mapping = {}
+    packages = 0
+    unnamed = 0
+
+    for package_full_name, sub in _enum_subkeys(winreg.HKEY_CURRENT_USER, APPMODEL_REG_PATH):
+        packages += 1
+        try:
+            root = _reg_value(sub, "PackageRootFolder")
+            if not root:
+                continue
+
+            # Games ship under WindowsApps. Framework and system packages that
+            # live elsewhere are skipped before touching the disk at all.
+            parts = {part.lower() for part in os.path.normpath(root).split(os.sep)}
+            if WINDOWS_APPS_DIR_NAME not in parts:
+                continue
+
+            # os.path.exists on a known filename succeeds inside WindowsApps
+            # where listing the directory does not, so no elevation is needed.
+            if not any(os.path.exists(os.path.join(root, marker))
+                       for marker in XBOX_GAME_MARKERS):
+                continue
+            if not os.path.isdir(root):
+                continue
+
+            name = _resolve_indirect_string(_reg_value(sub, "DisplayName"))
+            if not name:
+                name = _package_family_title(package_full_name)
+                unnamed += 1
+
+            mapping[_normalised_dir(root)] = name[:MAX_TITLE_LEN]
+        except Exception:
+            continue
+
+    XBOX_SCAN_INFO.update({"packages": packages, "games": len(mapping), "unnamed": unnamed})
+    debug_log(f"Found {len(mapping)} installed Xbox/Store games "
+              f"among {packages} packages.")
+    return mapping
 
 
 UPLAY_KEY_PREFIX = "uplay install "
@@ -1168,13 +1486,14 @@ def find_launcher_ancestor(pid, snapshot):
     if not info or info[1] in IGNORE_EXES:
         return None
     for name in ancestor_names(pid, snapshot):
-        # Checked before LAUNCHERS so that the nearest ancestor wins. A Steam
-        # game started through Playnite has Steam below Playnite in the chain,
-        # and must stay excluded rather than being reported as a Playnite game.
-        if name in EXCLUDED_ANCESTOR_EXES:
+        # Checked before the launcher table so that the nearest ancestor wins.
+        # While Steam is switched off, a Steam game started through Playnite has
+        # Steam below Playnite in the chain and must stay excluded rather than
+        # being reported as a Playnite game.
+        if name in ACTIVE_EXCLUSIONS:
             return None
-        if name in LAUNCHERS:
-            return LAUNCHERS[name]
+        if name in ACTIVE_LAUNCHERS:
+            return ACTIVE_LAUNCHERS[name]
     return None
 
 
@@ -1208,6 +1527,41 @@ def snapshot_processes():
     except Exception as e:
         debug_log(f"Could not enumerate processes: {e}")
     return snapshot, processes, running_exes
+
+
+def resolve_named_sources(processes, epic_title):
+    """Every platform that can name a running game, in priority order.
+
+    Returns a list of (launcher_label, title_or_None), skipping platforms that
+    are switched off. The poller and the diagnostics report both walk this, so
+    the report can never disagree with what would actually be published.
+
+    Epic leads because its log names the game outright. Steam is next because
+    RunningAppID is an exact signal from the client itself. Xbox sits below the
+    registry-backed sources because a package root match is the broadest test
+    here and should not outrank a precise one.
+    """
+    sources = [
+        ("Epic", lambda: epic_title),
+        ("Steam", lambda: find_steam_running_game()
+            or find_game_by_install_dir(processes, STEAM_BY_DIR)),
+        ("GOG", lambda: find_gog_game(processes) if (GOG_BY_PATH or GOG_BY_NAME) else None),
+        ("Battle.net", lambda: find_game_by_install_dir(processes, BATTLENET_BY_DIR)),
+        ("Xbox", lambda: find_game_by_install_dir(processes, XBOX_BY_DIR)),
+    ]
+
+    resolved = []
+    for launcher_name, resolver in sources:
+        if not platform_enabled(launcher_name):
+            continue
+        try:
+            resolved.append((launcher_name, resolver()))
+        except Exception as e:
+            # One platform's registry or filesystem going wrong must not stop
+            # the others from reporting.
+            debug_log(f"{launcher_name} detection failed this tick: {e}")
+            resolved.append((launcher_name, None))
+    return resolved
 
 
 class CustomGameTracker(threading.Thread):
@@ -1264,7 +1618,7 @@ class CustomGameTracker(threading.Thread):
             _, found_game, found_launcher = max(candidates, key=lambda c: c[0])
 
         # 2. Check JSON Custom Games (Using Dropdown/Type Rules)
-        if not found_game and custom_games:
+        if not found_game and custom_games and platform_enabled("Custom"):
             filtered_titles = [
                 w["title"].lower() for w in windows
                 if not w["title"].lower().endswith(BROWSER_SUFFIXES)
@@ -1285,24 +1639,22 @@ class CustomGameTracker(threading.Thread):
         reconcile_epic_games(running_exes, epic_window_alive)
         epic_title = epic_active_title()
 
-        # 4. Installed GOG and Battle.net games, matched by executable
-        gog_title = find_gog_game(processes) if GOG_BY_PATH or GOG_BY_NAME else None
-        bnet_title = find_game_by_install_dir(processes, BATTLENET_BY_DIR)
+        # 4. Installed games from each platform's own database, matched by the
+        # running process. Each source is skipped when its platform is off.
+        named_sources = resolve_named_sources(processes, epic_title)
 
         # 5. Apply State. This is the single decision point: publishing the whole
         # desired state every tick (deduplicated downstream) means a game closing
         # cannot leave a stale sensor behind, whichever source detected it.
         # Sources that know a game's real name outrank raw window titles.
-        if epic_title:
-            desired = ("playing", epic_title, "Epic")
-        elif gog_title:
-            desired = ("playing", gog_title, "GOG")
-        elif bnet_title:
-            desired = ("playing", bnet_title, "Battle.net")
-        elif found_game:
-            desired = ("playing", found_game, found_launcher)
+        desired = ("idle", "Offline", "None")
+        for launcher_name, title in named_sources:
+            if title:
+                desired = ("playing", title, launcher_name)
+                break
         else:
-            desired = ("idle", "Offline", "None")
+            if found_game:
+                desired = ("playing", found_game, found_launcher)
 
         if desired[1] != self.active_custom_game:
             self.active_custom_game = desired[1]
@@ -1379,6 +1731,13 @@ def build_diagnostic_report():
                f"{'' if catalog_url == DEFAULT_CATALOG_URL else '   (custom)'}")
     out.append(f"  Custom games     : {len(CONFIG.get('CUSTOM_GAMES', []))}")
 
+    section("PLATFORMS")
+    out.append("  Change these from the tray icon under \"Platforms\".")
+    out.append("")
+    for _label in PLATFORM_ORDER:
+        _state = "on" if platform_enabled(_label) else "off"
+        out.append(f"  {_label:16s} : {_state}")
+
     connected = "unknown"
     if client:
         try:
@@ -1398,6 +1757,21 @@ def build_diagnostic_report():
     section("INSTALLED GAME DATABASES")
     out.append(f"  GOG games known        : {len(GOG_BY_PATH)}")
     out.append(f"  Battle.net games known : {len(BATTLENET_BY_DIR)}")
+    out.append(f"  Steam games known      : {len(STEAM_BY_APPID)}")
+    if platform_enabled("Steam"):
+        out.append(f"      Steam install      : {STEAM_SCAN_INFO.get('root') or '<not found>'}")
+        for _library in (STEAM_SCAN_INFO.get("libraries") or [])[:10]:
+            out.append(f"      library            : {_library}")
+        if not STEAM_BY_APPID and STEAM_SCAN_INFO.get("root"):
+            out.append("      No appmanifest_*.acf files were readable. Steam can still")
+            out.append("      be detected live from its running-app registry key.")
+    out.append(f"  Xbox games known       : {len(XBOX_BY_DIR)}")
+    if platform_enabled("Xbox"):
+        out.append(f"      Store packages seen: {XBOX_SCAN_INFO.get('packages', 0)}")
+        _unnamed = XBOX_SCAN_INFO.get("unnamed", 0)
+        if _unnamed:
+            out.append(f"      {_unnamed} named from the package id because the Store display")
+            out.append("      name could not be resolved.")
     _matched = UBISOFT_REGISTRY_INFO.get("matched", 0)
     _added = UBISOFT_REGISTRY_INFO.get("added", 0)
     if _matched and not _added:
@@ -1442,9 +1816,13 @@ def build_diagnostic_report():
         elif own_exe in IGNORE_EXES:
             note = "skipped: launcher or helper process, not a game"
         elif not verdict:
-            excluded = [n for n in chain if n in EXCLUDED_ANCESTOR_EXES]
+            excluded = [n for n in chain if n in ACTIVE_EXCLUSIONS]
+            off = [LAUNCHERS[n] for n in chain
+                   if n in LAUNCHERS and n not in ACTIVE_LAUNCHERS]
             if excluded:
                 note = f"skipped: descends from {excluded[0]} (deliberately excluded)"
+            elif off:
+                note = f"skipped: {off[0]} is switched off in Platforms"
 
         out.append("")
         out.append(f"  title  : {title[:64]}")
@@ -1469,15 +1847,31 @@ def build_diagnostic_report():
         _, found_game, found_launcher = max(candidates, key=lambda c: c[0])
 
     epic_title = epic_active_title()
-    gog_title = find_gog_game(processes) if (GOG_BY_PATH or GOG_BY_NAME) else None
-    bnet_title = find_game_by_install_dir(processes, BATTLENET_BY_DIR)
+    named_sources = resolve_named_sources(processes, epic_title)
+
+    # How each named source finds its game, for the report only.
+    source_methods = {
+        "Epic": "launcher log",
+        "Steam": "running appid + manifests",
+        "GOG": "registry + process",
+        "Battle.net": "install dir",
+        "Xbox": "package folder"
+    }
 
     section("DETECTION SOURCES, IN PRIORITY ORDER")
-    out.append(f"  1. Epic (launcher log)      : {epic_title or '-'}")
-    out.append(f"  2. GOG (registry + process) : {gog_title or '-'}")
-    out.append(f"  3. Battle.net (install dir) : {bnet_title or '-'}")
-    out.append(f"  4. Window ancestry          : {found_game or '-'}"
+    _step = 0
+    for _label, _title in named_sources:
+        _step += 1
+        _how = f"{_label} ({source_methods.get(_label, 'installed games')})"
+        out.append(f"  {_step}. {_how:32s}: {_title or '-'}")
+    _step += 1
+    out.append(f"  {_step}. {'Window ancestry':32s}: {found_game or '-'}"
                f"{f'  [{found_launcher}]' if found_launcher else ''}")
+
+    _off = [name for name in PLATFORM_ORDER if not platform_enabled(name)]
+    if _off:
+        out.append("")
+        out.append(f"  Not checked, switched off: {', '.join(_off)}")
 
     if len(candidates) > 1:
         out.append("")
@@ -1486,16 +1880,14 @@ def build_diagnostic_report():
             mark = "  <-- chosen" if title == found_game else ""
             out.append(f"    {area:>12,} px  {title[:40]:42s} [{launcher_name}]{mark}")
 
-    if epic_title:
-        decision = ("playing", epic_title, "Epic")
-    elif gog_title:
-        decision = ("playing", gog_title, "GOG")
-    elif bnet_title:
-        decision = ("playing", bnet_title, "Battle.net")
-    elif found_game:
-        decision = ("playing", found_game, found_launcher)
+    decision = ("idle", "Offline", "None")
+    for _label, _title in named_sources:
+        if _title:
+            decision = ("playing", _title, _label)
+            break
     else:
-        decision = ("idle", "Offline", "None")
+        if found_game:
+            decision = ("playing", found_game, found_launcher)
     out.append("")
     out.append(f"  => would publish: {decision[1]}   (launcher: {decision[2]})")
 
@@ -1503,9 +1895,11 @@ def build_diagnostic_report():
     unknown = []
     for exe in sorted(e for e in running_exes
                       if any(t in e for t in LAUNCHER_FAMILY_TOKENS)):
-        if exe in LAUNCHERS:
-            role = f"launcher -> {LAUNCHERS[exe]}"
-        elif exe in EXCLUDED_ANCESTOR_EXES:
+        if exe in ACTIVE_LAUNCHERS:
+            role = f"launcher -> {ACTIVE_LAUNCHERS[exe]}"
+        elif exe in LAUNCHERS:
+            role = f"{LAUNCHERS[exe]} is switched off in Platforms"
+        elif exe in ACTIVE_EXCLUSIONS:
             role = "excluded (Home Assistant reports this natively)"
         elif exe in IGNORE_EXES:
             role = "helper / launcher window (ignored, correct)"
@@ -1621,13 +2015,37 @@ def stop_services():
         client = None
 
 
+def rebuild_active_tables():
+    """Re-derive the tables the ancestry scan consults from the ENABLE_* toggles.
+
+    Called on every start and restart, so a platform switched off in the
+    Platforms window stops being detected on Save & Apply. Standalone entry
+    points (gsa_diagnose.py) must call this too, or the ancestry scan sees an
+    empty launcher table and reports nothing.
+    """
+    global ACTIVE_LAUNCHERS, ACTIVE_EXCLUSIONS
+
+    ACTIVE_LAUNCHERS = {exe: label for exe, label in LAUNCHERS.items()
+                        if platform_enabled(label)}
+
+    # With Steam enabled, ancestry becomes a useful last-resort fallback for a
+    # title the manifest scan could not name, so the exclusion is dropped.
+    ACTIVE_EXCLUSIONS = set() if platform_enabled("Steam") else set(EXCLUDED_ANCESTOR_EXES)
+
+    disabled = [name for name in PLATFORM_ORDER if not platform_enabled(name)]
+    if disabled:
+        debug_log(f"Platforms switched off: {', '.join(disabled)}")
+
+
 def start_services():
     global client, observer, custom_tracker, CONFIG, PROFILE_SANITIZED
     global GOG_BY_PATH, GOG_BY_NAME, BATTLENET_BY_DIR
+    global STEAM_BY_DIR, STEAM_BY_APPID, XBOX_BY_DIR
     debug_log("Starting Gaming Status Agent services...")
 
     CONFIG = load_config()
     PROFILE_SANITIZED = sanitize_topic_part(CONFIG.get("HA_DEVICE_NAME", "User"))
+    rebuild_active_tables()
 
     client = _build_mqtt_client()
     client.on_connect = _on_connect
@@ -1664,17 +2082,21 @@ def start_services():
         debug_log(f"MQTT setup failed (check IP/Port): {e}")
 
     observer = Observer()
-    if os.path.exists(EPIC_LOG_DIR):
+    if platform_enabled("Epic") and os.path.exists(EPIC_LOG_DIR):
         epic_mapping = get_epic_mapping()
         epic_handler = GameLogHandler("Epic", os.path.join(EPIC_LOG_DIR, EPIC_LOG_FILE), epic_mapping)
         observer.schedule(epic_handler, path=EPIC_LOG_DIR, recursive=False)
         debug_log(f"Monitoring Epic Logs at: {EPIC_LOG_DIR}")
 
-    ubi_log_dir, ubi_mapping = get_ubisoft_info()
-    if ubi_log_dir and os.path.exists(ubi_log_dir):
-        ubi_handler = GameLogHandler("Ubisoft", os.path.join(ubi_log_dir, UBI_LOG_FILE), ubi_mapping)
-        observer.schedule(ubi_handler, path=ubi_log_dir, recursive=False)
-        debug_log(f"Monitoring Ubisoft Logs at: {ubi_log_dir}")
+    if not platform_enabled("Ubisoft"):
+        UBISOFT_REGISTRY_INFO.update({"total": 0, "matched": 0, "added": 0,
+                                      "unmatched": [], "names": []})
+    else:
+        ubi_log_dir, ubi_mapping = get_ubisoft_info()
+        if ubi_log_dir and os.path.exists(ubi_log_dir):
+            ubi_handler = GameLogHandler("Ubisoft", os.path.join(ubi_log_dir, UBI_LOG_FILE), ubi_mapping)
+            observer.schedule(ubi_handler, path=ubi_log_dir, recursive=False)
+            debug_log(f"Monitoring Ubisoft Logs at: {ubi_log_dir}")
 
     try:
         observer.start()
@@ -1683,8 +2105,12 @@ def start_services():
 
     # Refreshed on every restart, so newly installed games appear after a
     # Save & Apply rather than needing Gaming Status Agent to be closed and reopened.
-    GOG_BY_PATH, GOG_BY_NAME = get_gog_mapping()
-    BATTLENET_BY_DIR = get_battlenet_mapping()
+    # A platform that is off is left with an empty map, which every lookup
+    # already treats as "nothing to match".
+    GOG_BY_PATH, GOG_BY_NAME = get_gog_mapping() if platform_enabled("GOG") else ({}, {})
+    BATTLENET_BY_DIR = get_battlenet_mapping() if platform_enabled("Battle.net") else {}
+    STEAM_BY_DIR, STEAM_BY_APPID = get_steam_mapping() if platform_enabled("Steam") else ({}, {})
+    XBOX_BY_DIR = get_xbox_mapping() if platform_enabled("Xbox") else {}
 
     custom_tracker = CustomGameTracker()
     custom_tracker.daemon = True
@@ -1822,14 +2248,15 @@ def show_account_settings_ui():
     if _focus_existing("accounts"):
         return
 
-    acct_win = _make_settings_window("accounts", "Gaming Status Agent - Account Settings", "430x310")
+    acct_win = _make_settings_window("accounts", "Gaming Status Agent - Account Settings", "430x360")
 
     fields = [
         ("EPIC_PROFILE_NAME", "Epic Profile"),
         ("UBISOFT_PROFILE_NAME", "Ubisoft Profile"),
         ("GOG_PROFILE_NAME", "GOG Profile"),
         ("BATTLENET_PROFILE_NAME", "Battle.net Profile"),
-        ("EA_PROFILE_NAME", "EA Profile")
+        ("EA_PROFILE_NAME", "EA Profile"),
+        ("STEAM_PROFILE_NAME", "Steam Profile")
     ]
     vars_dict, row = _add_entry_rows(acct_win, fields)
 
@@ -1851,6 +2278,61 @@ def show_account_settings_ui():
 
 def open_account_settings(icon, item):
     ROOT.after(0, show_account_settings_ui)
+
+
+# Shown under each platform's checkbox where the choice is not obvious.
+PLATFORM_NOTES = {
+    "Steam": "Home Assistant has its own Steam integration",
+    "Xbox": "Home Assistant has its own Xbox integration",
+    "Custom": "your own rules, from the Custom Games window"
+}
+
+
+def show_platforms_ui():
+    if _focus_existing("platforms"):
+        return
+
+    plat_win = _make_settings_window("platforms", "Gaming Status Agent - Platforms", "430x470")
+
+    tk.Label(plat_win, text="Which platforms should be tracked?",
+             font=("", 9, "bold")).grid(row=0, column=0, columnspan=2,
+                                        padx=15, pady=(12, 6), sticky="w")
+
+    row = 1
+    vars_dict = {}
+    for label in PLATFORM_ORDER:
+        key = PLATFORM_ENABLE_KEYS[label]
+        var = tk.BooleanVar(value=platform_enabled(label))
+        vars_dict[key] = var
+        tk.Checkbutton(plat_win, text=label, variable=var).grid(
+            row=row, column=0, columnspan=2, padx=15, sticky="w")
+        row += 1
+
+        note = PLATFORM_NOTES.get(label)
+        if note:
+            tk.Label(plat_win, text=note, fg="gray40").grid(
+                row=row, column=0, columnspan=2, padx=38, sticky="w")
+            row += 1
+
+    def save_platforms():
+        for key, var in vars_dict.items():
+            CONFIG[key] = bool(var.get())
+
+        if not save_config():
+            messagebox.showerror("Error", "Could not save settings. See gsa_debug.log for details.")
+            return
+
+        messagebox.showinfo("Saved", "Platform settings saved successfully.\n"
+                                     "Gaming Status Agent will now apply them.")
+        OPEN_WINDOWS.pop("platforms", None)
+        plat_win.destroy()
+        restart_services()
+
+    _finish_settings_window(plat_win, row, save_platforms)
+
+
+def open_platforms(icon, item):
+    ROOT.after(0, show_platforms_ui)
 
 
 def show_custom_games_ui():
@@ -2068,6 +2550,7 @@ def quit_app(icon, item):
 def create_tray_menu():
     return pystray.Menu(
         pystray.MenuItem("MQTT Settings", open_settings),
+        pystray.MenuItem("Platforms", open_platforms),
         pystray.MenuItem("Account Settings", open_account_settings),
         pystray.MenuItem("Custom Games", open_custom_games),
         pystray.MenuItem("Run Diagnostics", open_diagnostics),

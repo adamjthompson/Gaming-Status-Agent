@@ -1,10 +1,8 @@
 # Gaming Status Agent
 
 A Windows system-tray app that reports what you're playing to Home Assistant
-over MQTT. It detects games from Epic, Ubisoft Connect, GOG, Battle.net, EA,
-Amazon Games and Playnite — including emulated titles launched through Playnite
-— and publishes a single sensor with the game name, the launcher, and when you
-started.
+over MQTT. It detects games from Epic, Ubisoft, GOG, Battle.net, EA,
+Amazon Games, and Playnite (including emulated titles launched through Playnite) and publishes a single sensor with the game name, the launcher, and when you started playing.
 
 Home Assistant discovers the sensor automatically. No YAML required.
 
@@ -38,6 +36,7 @@ tray. Right-click it and open **MQTT Settings** to enter your broker address.
 | Item | What it does |
 |---|---|
 | **MQTT Settings** | Broker address, port, credentials, TLS, the device name, poll rate |
+| **Platforms** | Which stores to track — Steam and Xbox start switched off |
 | **Account Settings** | Your gamertag per store — shown as the sensor's `Profile Name` |
 | **Custom Games** | Match games Gaming Status Agent doesn't detect on its own, by executable or window title |
 | **Run Diagnostics** | Shows exactly what Gaming Status Agent currently sees and why. Start here when something looks wrong |
@@ -70,29 +69,49 @@ Gaming Status Agent uses whichever source knows the game's real name, in this or
 1. **Epic** — reads the launcher log for game starts and the local manifests for
    real titles. Exits are detected by watching the game's process, because
    Epic's log does not reliably announce them.
-2. **GOG** — reads GOG Galaxy's registry entries. Matches on the game's
+2. **Steam** *(off by default)* — reads the appid Steam itself reports as
+   running from its client registry key, and names it from the
+   `appmanifest_*.acf` files across every Steam library on the machine.
+3. **GOG** — reads GOG Galaxy's registry entries. Matches on the game's
    executable, so it works even when a DRM-free game is started straight from a
    shortcut with Galaxy closed.
-3. **Battle.net** — reads Blizzard's uninstall entries for install locations,
+4. **Battle.net** — reads Blizzard's uninstall entries for install locations,
    then matches any process running from inside one.
-4. **Window ancestry** — for everything else, finds a visible window whose
+5. **Xbox / Microsoft Store** *(off by default)* — reads installed Store
+   packages from the app registry, keeps the ones carrying a game manifest, and
+   matches any process running from inside a package folder.
+6. **Window ancestry** — for everything else, finds a visible window whose
    process descends from a known launcher and uses its title.
 
 Sources that know a game's real name outrank raw window titles, so a
 Playnite-launched Epic game reports as **Epic** with its proper name rather than
 as Playnite with whatever the window happens to be called.
 
-### Steam is deliberately excluded
+Every source above is local. Nothing needs an API key, an internet connection or
+a public profile, and a private account is detected just as well as a public one.
 
-Home Assistant's own [Steam integration](https://www.home-assistant.io/integrations/steam_online/)
-reads what you're playing from the Steam Web API. That's a better source than
-anything Gaming Status Agent could determine locally — it's authoritative, and it works even
-when this PC is switched off. Gaming Status Agent therefore ignores anything launched through
-Steam rather than publishing a competing value.
+### Choosing platforms
 
-This applies to Steam games launched via Playnite too. A **Custom Games** rule
-still overrides the exclusion, because that's deliberate configuration rather
-than automatic detection.
+Right-click the tray icon and pick **Platforms** to switch any source on or off.
+Turning one off stops it being detected immediately on **Save & Apply** — no
+restart needed.
+
+### Steam and Xbox are off by default
+
+Both have an official Home Assistant integration of their own
+([Steam](https://www.home-assistant.io/integrations/steam_online/),
+[Xbox](https://www.home-assistant.io/integrations/xbox/)) that reads your status
+from the vendor's API. Those are authoritative, cover console and remote play,
+and keep working when this PC is switched off — so Gaming Status Agent does not
+switch itself on alongside them without being asked.
+
+Turn them on in **Platforms** if you want one sensor covering all PC play, or if
+you'd rather not connect an API key and a public profile. If you run both, expect
+two entities reporting the same session.
+
+While Steam is off, anything launched through Steam is ignored, Playnite-launched
+Steam games included. A **Custom Games** rule still overrides that, because it's
+deliberate configuration rather than automatic detection.
 
 ### What Playnite does and doesn't cover
 
@@ -111,6 +130,27 @@ and the game can't be attributed to it.
 
 Most settings live in the tray menu. `gsa_config.json` holds a few extra keys
 for less common situations.
+
+### `ENABLE_*`
+
+One key per platform, all editable from **Platforms** in the tray menu. Listed
+here because they're handy to set when deploying the same config to several PCs:
+
+| Key | Default |
+| --- | --- |
+| `ENABLE_EPIC` | `true` |
+| `ENABLE_UBISOFT` | `true` |
+| `ENABLE_GOG` | `true` |
+| `ENABLE_BATTLENET` | `true` |
+| `ENABLE_EA` | `true` |
+| `ENABLE_AMAZON` | `true` |
+| `ENABLE_PLAYNITE` | `true` |
+| `ENABLE_CUSTOM` | `true` |
+| `ENABLE_STEAM` | `false` |
+| `ENABLE_XBOX` | `false` |
+
+An older `gsa_config.json` that predates these keys picks up the defaults above
+on first load, so upgrading changes nothing about what's detected.
 
 ### `CATALOG_URL`
 
@@ -164,7 +204,8 @@ report on your clipboard for a bug report. It contains no passwords.
 |---|---|
 | No sensor in Home Assistant | Broker address or credentials. Diagnostics shows whether MQTT is connected |
 | Sensor stuck on an old game | Use Force Offline. If it recurs, send the diagnostics report |
-| A Steam game isn't detected | Expected — see above. Use HA's Steam integration |
+| A Steam or Xbox game isn't detected | Both start switched off. Turn them on under **Platforms**, or use HA's own Steam/Xbox integration |
+| An Xbox game reports an odd name | Its Store display name couldn't be resolved, so the package id was used. Add a Custom Games rule to override it |
 | Wrong name for an emulated game | Add a Custom Games rule matching the window title |
 | A game isn't detected at all | Diagnostics will show its window and process chain. If its launcher shows as `UNRECOGNISED`, open an issue with that line |
 | Ubisoft games named `Unknown Ubisoft Game (1234)` | The catalog didn't have that id. Add a `UBISOFT_OVERRIDES` entry, and consider opening a PR against the catalog |
