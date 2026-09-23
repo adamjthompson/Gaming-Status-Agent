@@ -23,7 +23,7 @@ import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.1.4"
+GSA_VERSION = "1.1.5"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -57,6 +57,14 @@ _WINDOW_ICON = None
 # by the poller instead. More than one game can be running at a time.
 EPIC_LOCK = threading.RLock()
 EPIC_GAMES = {}
+
+# The Ubisoft game named by the launcher log, as {"id": str, "title": str} or
+# None. The log handler only records it; the poller decides what is published.
+# Publishing straight from the log let the burst of product ids Ubisoft Connect
+# writes while a game boots (DLC, other owned games, id 0) flap the sensor
+# against the poller several times a second.
+UBISOFT_LOCK = threading.Lock()
+UBISOFT_GAME = None
 
 # Installed GOG games, read from the registry at startup:
 # GOG_BY_PATH maps a normalised full executable path -> game name (exact, used
@@ -125,6 +133,8 @@ DPAPI_PREFIX = "dpapi:"
 # How long to wait for a launched Epic game's process to appear before giving up
 # on it. Shield/EAC/prerequisite installers can delay a first launch noticeably.
 EPIC_STARTUP_GRACE = 180
+# Consecutive polls a changed state must hold before the poller publishes it.
+SETTLE_TICKS = 2
 
 GENERIC_ACCOUNT_NAMES = {"administrator", "admin", "user", "default", "guest", "owner"}
 
@@ -788,6 +798,16 @@ APPMODEL_REG_PATH = (r"Software\Classes\Local Settings\Software\Microsoft"
 # shim every Game Pass PC title is launched through.
 XBOX_GAME_MARKERS = ("MicrosoftGame.config", "gamelaunchhelper.exe")
 
+# Xbox infrastructure packages, matched by package name (the part before the
+# first "_"). Some ship a game marker, and their processes run constantly, so
+# without this Gaming Services was reported in place of the real game.
+XBOX_NON_GAME_PACKAGES = {
+    "microsoft.gamingservices", "microsoft.gamingapp", "microsoft.xboxapp",
+    "microsoft.xboxgamingoverlay", "microsoft.xboxgameoverlay",
+    "microsoft.xboxidentityprovider", "microsoft.xboxspeechtotextoverlay",
+    "microsoft.xbox.tcui", "microsoft.gameinput",
+}
+
 # Store packages live under a folder named exactly this.
 WINDOWS_APPS_DIR_NAME = "windowsapps"
 
@@ -923,15 +943,7 @@ def find_steam_running_game():
     return None
 
 
-def _resolve_indirect_string(value):
-    """Resolve an @{PackageFullName?ms-resource://...} display name.
-
-    Store packages usually store a localised resource reference rather than the
-    literal title, so publishing DisplayName unresolved would put the raw
-    ms-resource URI on the sensor.
-    """
-    if not value.startswith("@{"):
-        return value
+def _load_indirect_string(value):
     try:
         buffer = ctypes.create_unicode_buffer(1024)
         result = ctypes.windll.shlwapi.SHLoadIndirectString(
@@ -940,6 +952,39 @@ def _resolve_indirect_string(value):
             return buffer.value.strip()
     except Exception:
         pass
+    return ""
+
+
+def _resolve_indirect_string(value, package_full_name=""):
+    """Resolve a localised Store display name to its literal title.
+
+    Store packages usually store a resource reference rather than the title,
+    either as @{PackageFullName?ms-resource://...} or as a bare
+    "ms-resource:Name" relative to the package. Returns "" when it cannot be
+    resolved, so the caller falls back rather than publishing the raw URI.
+    """
+    if value.startswith("@{"):
+        return _load_indirect_string(value)
+    if not value.lower().startswith("ms-resource:"):
+        return value
+    if not package_full_name:
+        return ""
+
+    resource = value[len("ms-resource:"):].lstrip("/")
+    package_name = package_full_name.split("_")[0]
+    if resource.lower().startswith(package_name.lower() + "/"):
+        candidates = [f"ms-resource://{resource}"]
+    elif "/" in resource:
+        candidates = [f"ms-resource:///{resource}"]
+    else:
+        # Bare names usually live in the Resources map, occasionally at the root.
+        candidates = [f"ms-resource://{package_name}/Resources/{resource}",
+                      f"ms-resource:///Resources/{resource}",
+                      f"ms-resource://{package_name}/{resource}"]
+    for uri in candidates:
+        resolved = _load_indirect_string(f"@{{{package_full_name}?{uri}}}")
+        if resolved and not resolved.lower().startswith("ms-resource:"):
+            return resolved
     return ""
 
 
@@ -968,6 +1013,8 @@ def get_xbox_mapping():
     for package_full_name, sub in _enum_subkeys(winreg.HKEY_CURRENT_USER, APPMODEL_REG_PATH):
         packages += 1
         try:
+            if package_full_name.split("_")[0].lower() in XBOX_NON_GAME_PACKAGES:
+                continue
             root = _reg_value(sub, "PackageRootFolder")
             if not root:
                 continue
@@ -986,7 +1033,8 @@ def get_xbox_mapping():
             if not os.path.isdir(root):
                 continue
 
-            name = _resolve_indirect_string(_reg_value(sub, "DisplayName"))
+            name = _resolve_indirect_string(_reg_value(sub, "DisplayName"),
+                                            package_full_name)
             if not name:
                 name = _package_family_title(package_full_name)
                 unnamed += 1
@@ -1352,6 +1400,17 @@ def reconcile_epic_games(running_exes, epic_window_alive):
     return changed
 
 
+def set_ubisoft_game(game):
+    global UBISOFT_GAME
+    with UBISOFT_LOCK:
+        UBISOFT_GAME = game
+
+
+def ubisoft_active_title():
+    with UBISOFT_LOCK:
+        return UBISOFT_GAME["title"] if UBISOFT_GAME else None
+
+
 def republish_current_state():
     """Re-send discovery and state after a reconnect; HA may have restarted too."""
     with STATE_LOCK:
@@ -1481,16 +1540,26 @@ class GameLogHandler(FileSystemEventHandler):
     def process_ubisoft_line(self, line):
         if "started with product id" in line or "successfully started for game" in line:
             match = UBI_PRODUCT_RE.search(line) or UBI_GAME_RE.search(line)
-            if match:
-                self.current_game_id = match.group(1)
-                entry = self.games_mapping.get(self.current_game_id, {})
-                title = entry.get("title") or f"Unknown Ubisoft Game ({self.current_game_id})"
-                debug_log(f"Ubisoft Launcher detected game start: {title}")
-                publish_global_state("playing", title, self.launcher_name)
+            if not match or match.group(1) == "0":
+                return
+            game_id = match.group(1)
+            title = self.games_mapping.get(game_id, {}).get("title")
+            with UBISOFT_LOCK:
+                current = UBISOFT_GAME
+            # An unmapped id logged while a known game is starting is almost
+            # always a DLC or entitlement check, not a second game.
+            if not title and current and current["id"] in self.games_mapping:
+                debug_log(f"Ubisoft log named unmapped product {game_id} while "
+                          f"{current['title']} is active; ignoring it.")
+                return
+            title = title or f"Unknown Ubisoft Game ({game_id})"
+            self.current_game_id = game_id
+            set_ubisoft_game({"id": game_id, "title": title})
+            debug_log(f"Ubisoft Launcher detected game start: {title}")
 
         elif self.current_game_id and ("Game process ended" in line or "successfully deleted for game" in line):
             debug_log("Ubisoft Launcher detected game close")
-            publish_global_state("idle", "Offline", "None")
+            set_ubisoft_game(None)
             self.current_game_id = None
 
 
@@ -1595,12 +1664,15 @@ def resolve_named_sources(processes, epic_title):
     Epic leads because its log names the game outright. Steam is next because
     RunningAppID is an exact signal from the client itself. Xbox sits below the
     registry-backed sources because a package root match is the broadest test
-    here and should not outrank a precise one.
+    here and should not outrank a precise one. Ubisoft follows Steam: a Ubisoft
+    game bought on Steam also starts Ubisoft Connect, whose log names several
+    products while it boots, and Steam's RunningAppID is the exact answer.
     """
     sources = [
         ("Epic", lambda: epic_title),
         ("Steam", lambda: find_steam_running_game()
             or find_game_by_install_dir(processes, STEAM_BY_DIR)),
+        ("Ubisoft", ubisoft_active_title),
         ("GOG", lambda: find_gog_game(processes) if (GOG_BY_PATH or GOG_BY_NAME) else None),
         ("Battle.net", lambda: find_game_by_install_dir(processes, BATTLENET_BY_DIR)),
         ("Xbox", lambda: find_game_by_install_dir(processes, XBOX_BY_DIR)),
@@ -1625,6 +1697,9 @@ class CustomGameTracker(threading.Thread):
         super().__init__()
         self.stop_event = threading.Event()
         self.active_custom_game = None
+        # The last tick's desired state and how many ticks in a row it has held.
+        self.pending_state = None
+        self.pending_ticks = 0
 
     def stop(self):
         self.stop_event.set()
@@ -1734,7 +1809,19 @@ class CustomGameTracker(threading.Thread):
             else:
                 debug_log("Poller state: no game running.")
 
-        publish_global_state(*desired)
+        # Settle delay: a new state must hold for SETTLE_TICKS polls in a row
+        # before it is published. Launchers briefly name the wrong game while
+        # one boots, and a single errant publish is enough to fire a Home
+        # Assistant notification.
+        if desired == self.pending_state:
+            self.pending_ticks += 1
+        else:
+            self.pending_state = desired
+            self.pending_ticks = 1
+        if self.pending_ticks >= SETTLE_TICKS:
+            publish_global_state(*desired)
+        else:
+            debug_log(f"Waiting for {desired[1]} to settle before publishing.")
 
     def match_custom_game(self, game, running_exes, filtered_titles):
         """Return the game title if this entry matches, else None."""
@@ -1924,6 +2011,7 @@ def build_diagnostic_report():
     source_methods = {
         "Epic": "launcher log",
         "Steam": "running appid + manifests",
+        "Ubisoft": "launcher log",
         "GOG": "registry + process",
         "Battle.net": "install dir",
         "Xbox": "package folder"
@@ -2073,6 +2161,7 @@ def stop_services():
     # Fresh handlers are built on restart; stale entries would resurrect games.
     with EPIC_LOCK:
         EPIC_GAMES.clear()
+    set_ubisoft_game(None)
 
     if client:
         try:
@@ -2620,6 +2709,7 @@ def force_offline(icon, item):
     # Clear tracked Epic games too, or the next poll would republish them.
     with EPIC_LOCK:
         EPIC_GAMES.clear()
+    set_ubisoft_game(None)
     if custom_tracker:
         custom_tracker.active_custom_game = None
     publish_global_state("idle", "Offline", "None")
