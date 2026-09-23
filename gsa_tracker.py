@@ -23,7 +23,7 @@ import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.1.2"
+GSA_VERSION = "1.1.3"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -2635,6 +2635,46 @@ def quit_app(icon, item):
     ROOT.after(0, ROOT.quit)
 
 
+RUN_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE_NAME = "Gaming Status Agent"
+
+
+def startup_command():
+    """The command line Windows runs at login to start this app."""
+    if getattr(sys, 'frozen', False):
+        return f'"{sys.executable}"'
+    # Running from source: prefer pythonw so no console window opens at login.
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    interpreter = pythonw if os.path.exists(pythonw) else sys.executable
+    return f'"{interpreter}" "{os.path.abspath(__file__)}"'
+
+
+def startup_enabled(item=None):
+    """True if the per-user Run key starts this app at login. The registry is
+    the only record of this, so an entry removed in Task Manager shows as off."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_REG_PATH) as key:
+            winreg.QueryValueEx(key, RUN_VALUE_NAME)
+        return True
+    except OSError:
+        return False
+
+
+def toggle_startup(icon, item):
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_REG_PATH, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            if startup_enabled():
+                winreg.DeleteValue(key, RUN_VALUE_NAME)
+                debug_log("Start at login disabled.")
+            else:
+                winreg.SetValueEx(key, RUN_VALUE_NAME, 0, winreg.REG_SZ,
+                                  startup_command())
+                debug_log("Start at login enabled.")
+    except OSError as e:
+        debug_log(f"Could not change start at login: {e}")
+
+
 def create_tray_menu():
     # visible= takes a callable, re-evaluated each time the menu is opened, so
     # toggling a platform updates the menu without rebuilding the tray icon.
@@ -2645,6 +2685,8 @@ def create_tray_menu():
                          visible=lambda item: bool(gamertag_fields())),
         pystray.MenuItem("Custom Games", open_custom_games,
                          visible=lambda item: platform_enabled("Custom")),
+        pystray.MenuItem("Start Gaming Status Agent at Login", toggle_startup,
+                         checked=startup_enabled),
         pystray.MenuItem("Run Diagnostics", open_diagnostics),
         pystray.MenuItem("Force Offline", force_offline),
         pystray.MenuItem("Quit", quit_app)
