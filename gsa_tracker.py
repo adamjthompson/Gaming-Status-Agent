@@ -23,7 +23,7 @@ import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.1.8"
+GSA_VERSION = "1.1.9"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -1653,14 +1653,21 @@ def ancestor_names(pid, snapshot):
         return
     seen = {pid}
     ppid = info[0]
+    child_created = info[2]
     depth = 0
     while ppid and ppid not in seen and depth < MAX_ANCESTRY_DEPTH:
         parent = snapshot.get(ppid)
         if not parent:
             return
+        # Windows reuses PIDs. A "parent" created after its child is an
+        # unrelated process that inherited a dead parent's PID; following it
+        # credited a Notepad window to whatever launcher owned the new PID.
+        if parent[2] and child_created and parent[2] > child_created:
+            return
         yield parent[1]
         seen.add(ppid)
         ppid = parent[0]
+        child_created = parent[2]
         depth += 1
 
 
@@ -1692,18 +1699,20 @@ def snapshot_processes():
     """One process enumeration per call, shared by the poller and diagnostics.
 
     Returns (snapshot, processes, running_exes) where snapshot maps
-    pid -> (ppid, exe_name) and processes is a list of (exe_name, full_path).
-    'exe' is None where the path cannot be read; psutil does not raise for that.
+    pid -> (ppid, exe_name, create_time) and processes is a list of
+    (exe_name, full_path). 'exe' is None where the path cannot be read, and
+    create_time is 0 where it cannot; psutil does not raise for either.
     """
     snapshot = {}
     processes = []
     running_exes = set()
     try:
-        for proc in psutil.process_iter(['pid', 'ppid', 'name', 'exe']):
+        for proc in psutil.process_iter(['pid', 'ppid', 'name', 'exe', 'create_time']):
             info = proc.info
             name = (info.get('name') or "").lower()
             if info.get('pid') is not None:
-                snapshot[info['pid']] = (info.get('ppid'), name)
+                snapshot[info['pid']] = (info.get('ppid'), name,
+                                         info.get('create_time') or 0)
             if name:
                 running_exes.add(name)
                 processes.append((name, info.get('exe')))
