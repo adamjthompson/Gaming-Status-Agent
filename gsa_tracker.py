@@ -23,7 +23,7 @@ import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.1.5"
+GSA_VERSION = "1.1.8"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -86,6 +86,9 @@ STEAM_BY_APPID = {}
 
 # Installed Xbox / Microsoft Store games: normalised package root -> name.
 XBOX_BY_DIR = {}
+# Store package roots that were NOT counted as games: root -> package full
+# name. Diagnostics only, to explain why a running Store game was missed.
+XBOX_OTHER_ROOTS = {}
 
 # Rebuilt by start_services() from the ENABLE_* toggles. The static LAUNCHERS
 # and EXCLUDED_ANCESTOR_EXES tables stay as written; these are what the
@@ -314,7 +317,8 @@ IGNORE_EXES = {
     # this it would be published as the game by the install-directory match.
     "gamelaunchhelper.exe", "gamingservices.exe", "gamingservicesnet.exe",
     "gamebar.exe", "gamebarftserver.exe", "gamebarpresencewriter.exe",
-    "xboxpcapp.exe", "xbox.exe", "xboxpcappft.exe", "gameinputsvc.exe"
+    "xboxpcapp.exe", "xbox.exe", "xboxpcappft.exe", "gameinputsvc.exe",
+    "xboxgamebarwidgets.exe"
 }
 
 # Executable names too generic to identify a game on their own. A GOG title
@@ -757,6 +761,69 @@ def find_game_by_install_dir(processes, dir_map):
     return None
 
 
+def _clean_xbox_title(name):
+    """Drop the platform suffix Store listings carry: "Doom Eternal - PC"."""
+    return re.sub(r'\s*(?:-\s*PC|\(PC\)|for Windows(?: 10)?)\s*$', '', name,
+                  flags=re.IGNORECASE).strip() or name
+
+
+def find_xbox_games_folder_game(processes):
+    """Name a game running from <drive>:\\XboxGames\\<Game>\\Content.
+
+    The registry's PackageRootFolder for these points into WindowsApps, which
+    is only a mount of the real install, so the process path never matches it.
+    The Xbox app names the folder after the game's Store title, so the folder
+    name is used, preferring the scanned display name when they agree.
+    """
+    names_by_folder = {_clean_xbox_title(n).lower(): n for n in XBOX_BY_DIR.values()}
+    for exe_name, exe_path in processes:
+        if not exe_path or exe_name in IGNORE_EXES:
+            continue
+        parts = os.path.normpath(exe_path).split(os.sep)
+        lowered = [p.lower() for p in parts]
+        if XBOX_GAMES_DIR_NAME not in lowered:
+            continue
+        index = lowered.index(XBOX_GAMES_DIR_NAME)
+        # Needs a folder beneath the game folder, i.e. an actual file inside it.
+        if index + 2 >= len(parts):
+            continue
+        folder = parts[index + 1]
+        title = names_by_folder.get(_clean_xbox_title(folder).lower(), folder)
+        return _clean_xbox_title(title)[:MAX_TITLE_LEN]
+    return None
+
+
+# (package root, exe name) -> whether that file exists, so the per-tick
+# fallback below touches the disk once per pair rather than every poll.
+_XBOX_EXE_CACHE = {}
+
+
+def find_xbox_game(processes):
+    """Return the name of a running Xbox / Store game, or None.
+
+    Store games commonly run as protected processes whose path psutil cannot
+    read, and find_game_by_install_dir skips those. For them, test whether a
+    file of that name exists in the package root instead. os.path.exists on a
+    known name works inside WindowsApps without elevation.
+    """
+    found = find_game_by_install_dir(processes, XBOX_BY_DIR)
+    if found:
+        return found
+    found = find_xbox_games_folder_game(processes)
+    if found or not XBOX_BY_DIR:
+        return found
+    for exe_name, exe_path in processes:
+        if exe_path or not exe_name or exe_name in IGNORE_EXES:
+            continue
+        for root, name in XBOX_BY_DIR.items():
+            key = (root, exe_name)
+            if key not in _XBOX_EXE_CACHE:
+                _XBOX_EXE_CACHE[key] = os.path.exists(os.path.join(root, exe_name))
+            if _XBOX_EXE_CACHE[key]:
+                return name
+    return None
+
+
 def find_gog_game(processes):
     """Return the name of a running GOG game, or None.
 
@@ -808,8 +875,15 @@ XBOX_NON_GAME_PACKAGES = {
     "microsoft.xbox.tcui", "microsoft.gameinput",
 }
 
-# Store packages live under a folder named exactly this.
-WINDOWS_APPS_DIR_NAME = "windowsapps"
+# System packages live under the Windows folder and are never games. Games are
+# not confined to WindowsApps: the Xbox app installs them to <drive>:\XboxGames
+# (or any folder the user picks), so the marker file is the real test.
+WINDOWS_DIR = _normalised_dir(os.environ.get("SystemRoot", r"C:\Windows"))
+
+# The Xbox app's default install folder. Only games are installed there, so a
+# package under it counts even without a marker file; older Game Pass titles
+# packaged before the GDK carry neither marker.
+XBOX_GAMES_DIR_NAME = "xboxgames"
 
 
 def _read_vdf_pairs(path):
@@ -1009,6 +1083,8 @@ def get_xbox_mapping():
     mapping = {}
     packages = 0
     unnamed = 0
+    XBOX_OTHER_ROOTS.clear()
+    _XBOX_EXE_CACHE.clear()
 
     for package_full_name, sub in _enum_subkeys(winreg.HKEY_CURRENT_USER, APPMODEL_REG_PATH):
         packages += 1
@@ -1019,19 +1095,24 @@ def get_xbox_mapping():
             if not root:
                 continue
 
-            # Games ship under WindowsApps. Framework and system packages that
-            # live elsewhere are skipped before touching the disk at all.
-            parts = {part.lower() for part in os.path.normpath(root).split(os.sep)}
-            if WINDOWS_APPS_DIR_NAME not in parts:
+            # System packages are skipped before touching the disk at all.
+            if _normalised_dir(root).startswith(WINDOWS_DIR):
                 continue
+
+            if not os.path.isdir(root):
+                continue
+            # Every other package root is kept, unnamed, so diagnostics can say
+            # which package a running game belongs to when it was not counted.
+            XBOX_OTHER_ROOTS[_normalised_dir(root)] = package_full_name
 
             # os.path.exists on a known filename succeeds inside WindowsApps
             # where listing the directory does not, so no elevation is needed.
-            if not any(os.path.exists(os.path.join(root, marker))
-                       for marker in XBOX_GAME_MARKERS):
+            parts = {part.lower() for part in os.path.normpath(root).split(os.sep)}
+            if XBOX_GAMES_DIR_NAME not in parts and not any(
+                    os.path.exists(os.path.join(root, marker))
+                    for marker in XBOX_GAME_MARKERS):
                 continue
-            if not os.path.isdir(root):
-                continue
+            del XBOX_OTHER_ROOTS[_normalised_dir(root)]
 
             name = _resolve_indirect_string(_reg_value(sub, "DisplayName"),
                                             package_full_name)
@@ -1039,7 +1120,7 @@ def get_xbox_mapping():
                 name = _package_family_title(package_full_name)
                 unnamed += 1
 
-            mapping[_normalised_dir(root)] = name[:MAX_TITLE_LEN]
+            mapping[_normalised_dir(root)] = _clean_xbox_title(name)[:MAX_TITLE_LEN]
         except Exception:
             continue
 
@@ -1675,7 +1756,7 @@ def resolve_named_sources(processes, epic_title):
         ("Ubisoft", ubisoft_active_title),
         ("GOG", lambda: find_gog_game(processes) if (GOG_BY_PATH or GOG_BY_NAME) else None),
         ("Battle.net", lambda: find_game_by_install_dir(processes, BATTLENET_BY_DIR)),
-        ("Xbox", lambda: find_game_by_install_dir(processes, XBOX_BY_DIR)),
+        ("Xbox", lambda: find_xbox_game(processes)),
     ]
 
     resolved = []
@@ -1926,6 +2007,8 @@ def build_diagnostic_report():
     out.append(f"  Xbox games known       : {len(XBOX_BY_DIR)}")
     if platform_enabled("Xbox"):
         out.append(f"      Store packages seen: {XBOX_SCAN_INFO.get('packages', 0)}")
+        for _root, _name in sorted(XBOX_BY_DIR.items(), key=lambda kv: kv[1])[:15]:
+            out.append(f"      {_name}  ({_root})")
         _unnamed = XBOX_SCAN_INFO.get("unnamed", 0)
         if _unnamed:
             out.append(f"      {_unnamed} named from the package id because the Store display")
@@ -1986,6 +2069,18 @@ def build_diagnostic_report():
         out.append(f"  title  : {title[:64]}")
         out.append(f"  pid    : {pid}   exe: {own_exe}   size: {win.get('area', 0):,} px")
         out.append(f"  parents: {' -> '.join(chain) if chain else '<none / chain broken>'}")
+        try:
+            exe_path = psutil.Process(pid).exe()
+        except Exception:
+            exe_path = ""
+        out.append(f"  path   : {exe_path or '<unreadable>'}")
+        if exe_path and platform_enabled("Xbox"):
+            resolved = os.path.normcase(os.path.abspath(exe_path))
+            package = next((pkg for root, pkg in XBOX_OTHER_ROOTS.items()
+                            if resolved.startswith(root)), None)
+            if package:
+                out.append(f"  xbox   : inside Store package {package}, which has no")
+                out.append("           game marker file, so it is not counted as a game")
         out.append(f"  verdict: {verdict or 'NOT DETECTED'}")
         if note:
             out.append(f"  reason : {note}")
