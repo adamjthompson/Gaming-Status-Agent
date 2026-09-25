@@ -168,6 +168,8 @@ DEFAULT_CONFIG = {
     "EA_PROFILE_NAME": "",
     "STEAM_PROFILE_NAME": "",
     "XBOX_PROFILE_NAME": "",
+    "RIOT_PROFILE_NAME": "",
+    "HOYOVERSE_PROFILE_NAME": "",
     # Per-platform switches, all editable from the tray under "Platforms".
     # Steam and Xbox default to off: each has an official Home Assistant
     # integration of its own, and turning them on here without asking would
@@ -185,6 +187,11 @@ DEFAULT_CONFIG = {
     "ENABLE_CUSTOM": False,
     "ENABLE_STEAM": False,
     "ENABLE_XBOX": False,
+    # Opt-in: these are matched by fixed executable names rather than a
+    # launcher's own records, so they stay off until someone asks for them.
+    "ENABLE_RIOT": False,
+    "ENABLE_HOYOVERSE": False,
+    "ENABLE_MINECRAFT": False,
     "MQTT_BROKER": "192.168.1.xxx",
     "MQTT_PORT": 1883,
     # Blank so a broker that allows anonymous access connects on first run.
@@ -212,7 +219,9 @@ LAUNCHER_PROFILE_KEYS = {
     "Battle.net": "BATTLENET_PROFILE_NAME",
     "EA": "EA_PROFILE_NAME",
     "Steam": "STEAM_PROFILE_NAME",
-    "Xbox": "XBOX_PROFILE_NAME"
+    "Xbox": "XBOX_PROFILE_NAME",
+    "Riot Games": "RIOT_PROFILE_NAME",
+    "HoYoverse": "HOYOVERSE_PROFILE_NAME"
 }
 
 # Launcher label -> the config key that switches it on. Every detector consults
@@ -227,12 +236,18 @@ PLATFORM_ENABLE_KEYS = {
     "Playnite": "ENABLE_PLAYNITE",
     "Steam": "ENABLE_STEAM",
     "Xbox": "ENABLE_XBOX",
+    "Riot Games": "ENABLE_RIOT",
+    "HoYoverse": "ENABLE_HOYOVERSE",
+    "Minecraft": "ENABLE_MINECRAFT",
     "Custom": "ENABLE_CUSTOM"
 }
 
-# Order shown in the Platforms window, and the order the poller tries sources in.
-PLATFORM_ORDER = ("Epic", "Steam", "GOG", "Battle.net", "Xbox",
-                  "Ubisoft", "EA", "Amazon Games", "Playnite", "Custom")
+# Display order for the Platforms and Gamertags windows, diagnostics and the
+# log: alphabetical, so a platform is easy to find, with Custom last as the
+# catch-all. Detection priority is set separately, in resolve_named_sources().
+PLATFORM_ORDER = ("Amazon Games", "Battle.net", "EA", "Epic", "GOG",
+                  "HoYoverse", "Minecraft", "Playnite", "Riot Games", "Steam",
+                  "Ubisoft", "Xbox", "Custom")
 
 
 def platform_enabled(launcher_name):
@@ -318,7 +333,13 @@ IGNORE_EXES = {
     "gamelaunchhelper.exe", "gamingservices.exe", "gamingservicesnet.exe",
     "gamebar.exe", "gamebarftserver.exe", "gamebarpresencewriter.exe",
     "xboxpcapp.exe", "xbox.exe", "xboxpcappft.exe", "gameinputsvc.exe",
-    "xboxgamebarwidgets.exe"
+    "xboxgamebarwidgets.exe",
+    # Riot, HoYoPlay and Minecraft launchers and lobbies. Only the games
+    # themselves count as playing, so these must never be published.
+    "riotclientservices.exe", "riotclientux.exe", "riotclientuxrender.exe",
+    "leagueclient.exe", "leagueclientux.exe", "leagueclientuxrender.exe",
+    "hyp.exe", "hoyoplay.exe", "minecraftlauncher.exe", "minecraft.exe",
+    "curseforge.exe"
 }
 
 # Executable names too generic to identify a game on their own. A GOG title
@@ -358,7 +379,8 @@ LAUNCHER_FAMILY_TOKENS = (
     "galaxyclient", "galaxycommunication", "galaxyoverlay", "gog galaxy",
     "battle.net", "blizzard", "steam", "ubisoft", "uplay", "upc.exe",
     "eadesktop", "eabackgroundservice", "origin",
-    "xbox", "gamingservices", "gamelaunchhelper", "gamebar"
+    "xbox", "gamingservices", "gamelaunchhelper", "gamebar",
+    "riot", "league", "hyp.exe", "hoyoplay", "minecraft", "curseforge"
 )
 
 # Anything descended from these is never auto-detected while its platform is
@@ -1725,7 +1747,8 @@ def snapshot_processes():
 # game has exited; the rest match a running process against an install folder
 # or executable. Used to decide whether a poll needs to enumerate processes at
 # all, so a machine with everything switched off does no work per tick.
-PROCESS_BACKED_PLATFORMS = ("Epic", "Steam", "GOG", "Battle.net", "Xbox", "Custom")
+PROCESS_BACKED_PLATFORMS = ("Epic", "Steam", "GOG", "Battle.net", "Xbox",
+                            "Riot Games", "HoYoverse", "Minecraft", "Custom")
 
 
 def poll_work_needed():
@@ -1737,14 +1760,91 @@ def poll_work_needed():
     """
     # Window titles feed the ancestry scan, the Custom window-title rules, and
     # Epic's "is a launcher-descended window still open" liveness check.
+    # Minecraft Java is recognised by its window title.
     needs_windows = bool(ACTIVE_LAUNCHERS) or platform_enabled("Custom") \
-        or platform_enabled("Epic")
+        or platform_enabled("Epic") or platform_enabled("Minecraft")
     needs_processes = bool(ACTIVE_LAUNCHERS) or any(
         platform_enabled(name) for name in PROCESS_BACKED_PLATFORMS)
     return needs_windows, needs_processes
 
 
-def resolve_named_sources(processes, epic_title):
+# Games recognised by their own executable, for platforms whose launchers keep
+# no local record worth reading. Only in-game processes are listed: lobbies
+# and launchers are in IGNORE_EXES and never count as playing.
+KNOWN_GAME_EXES = {
+    "genshinimpact.exe": ("Genshin Impact", "HoYoverse"),
+    "yuanshen.exe": ("Genshin Impact", "HoYoverse"),
+    "starrail.exe": ("Honkai: Star Rail", "HoYoverse"),
+    "zenlesszonezero.exe": ("Zenless Zone Zero", "HoYoverse"),
+    "bh3.exe": ("Honkai Impact 3rd", "HoYoverse"),
+    "valorant-win64-shipping.exe": ("VALORANT", "Riot Games"),
+    "lor.exe": ("Legends of Runeterra", "Riot Games"),
+    "league of legends.exe": ("League of Legends", "Riot Games"),
+    "minecraft.windows.exe": ("Minecraft", "Minecraft"),
+}
+
+MINECRAFT_JAVA_EXES = {"javaw.exe", "java.exe"}
+
+# League and TFT share one executable. The game's own Live Client Data API
+# reports the mode once a match has loaded. It is local-only and serves a
+# self-signed certificate, hence no verification.
+LEAGUE_GAMESTATS_URL = "https://127.0.0.1:2999/liveclientdata/gamestats"
+LEAGUE_MODE_CACHE_SECONDS = 30
+_LEAGUE_MODE = {"title": None, "checked": 0.0}
+
+
+def league_mode_title():
+    """ "Teamfight Tactics" or "League of Legends" for the running League game."""
+    now = time.monotonic()
+    if _LEAGUE_MODE["title"] and now - _LEAGUE_MODE["checked"] < LEAGUE_MODE_CACHE_SECONDS:
+        return _LEAGUE_MODE["title"]
+    title = "League of Legends"
+    try:
+        import ssl
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(LEAGUE_GAMESTATS_URL, timeout=1,
+                                    context=context) as response:
+            stats = json.loads(response.read(64 * 1024).decode("utf-8"))
+        if str(stats.get("gameMode", "")).upper() == "TFT":
+            title = "Teamfight Tactics"
+        # Only a real answer is cached; while the match is still loading the
+        # API is down, and the next poll should ask again.
+        _LEAGUE_MODE.update({"title": title, "checked": now})
+    except Exception:
+        pass
+    return title
+
+
+def find_known_exe_game(running_exes, platform):
+    """Title of a running game from KNOWN_GAME_EXES for this platform, or None."""
+    for exe, (title, owner) in KNOWN_GAME_EXES.items():
+        if owner == platform and exe in running_exes:
+            if exe == "league of legends.exe":
+                return league_mode_title()
+            return title
+    return None
+
+
+def find_minecraft_java(windows, snapshot):
+    """Minecraft Java Edition, whichever launcher started it.
+
+    The official launcher, CurseForge, Prism and MultiMC all end up running the
+    game in javaw.exe, whose window title starts with "Minecraft". Matching that
+    pair rather than the launcher covers all of them, and ignores unrelated
+    Java programs.
+    """
+    for win in windows:
+        info = snapshot.get(win["pid"])
+        if info and info[1] in MINECRAFT_JAVA_EXES \
+                and win["title"].lower().startswith("minecraft"):
+            return "Minecraft: Java Edition"
+    return None
+
+
+def resolve_named_sources(processes, epic_title, running_exes=frozenset(),
+                          windows=(), snapshot=None):
     """Every platform that can name a running game, in priority order.
 
     Returns a list of (launcher_label, title_or_None), skipping platforms that
@@ -1766,6 +1866,10 @@ def resolve_named_sources(processes, epic_title):
         ("GOG", lambda: find_gog_game(processes) if (GOG_BY_PATH or GOG_BY_NAME) else None),
         ("Battle.net", lambda: find_game_by_install_dir(processes, BATTLENET_BY_DIR)),
         ("Xbox", lambda: find_xbox_game(processes)),
+        ("Riot Games", lambda: find_known_exe_game(running_exes, "Riot Games")),
+        ("HoYoverse", lambda: find_known_exe_game(running_exes, "HoYoverse")),
+        ("Minecraft", lambda: find_known_exe_game(running_exes, "Minecraft")
+            or find_minecraft_java(windows, snapshot or {})),
     ]
 
     resolved = []
@@ -1877,7 +1981,8 @@ class CustomGameTracker(threading.Thread):
 
         # 4. Installed games from each platform's own database, matched by the
         # running process. Each source is skipped when its platform is off.
-        named_sources = resolve_named_sources(processes, epic_title)
+        named_sources = resolve_named_sources(processes, epic_title,
+                                              running_exes, windows, snapshot)
 
         # 5. Apply State. This is the single decision point: publishing the whole
         # desired state every tick (deduplicated downstream) means a game closing
@@ -2109,7 +2214,8 @@ def build_diagnostic_report():
         _, found_game, found_launcher = max(candidates, key=lambda c: c[0])
 
     epic_title = epic_active_title()
-    named_sources = resolve_named_sources(processes, epic_title)
+    named_sources = resolve_named_sources(processes, epic_title,
+                                          running_exes, windows, snapshot)
 
     # How each named source finds its game, for the report only.
     source_methods = {
@@ -2118,7 +2224,10 @@ def build_diagnostic_report():
         "Ubisoft": "launcher log",
         "GOG": "registry + process",
         "Battle.net": "install dir",
-        "Xbox": "package folder"
+        "Xbox": "package folder",
+        "Riot Games": "game executable",
+        "HoYoverse": "game executable",
+        "Minecraft": "exe / javaw window"
     }
 
     section("DETECTION SOURCES, IN PRIORITY ORDER")
@@ -2168,6 +2277,8 @@ def build_diagnostic_report():
             role = "helper / launcher window (ignored, correct)"
         elif exe in EPIC_LAUNCHER_EXES:
             role = "Epic liveness signal"
+        elif exe in KNOWN_GAME_EXES:
+            role = f"game -> {KNOWN_GAME_EXES[exe][1]}"
         else:
             role = "UNRECOGNISED"
             unknown.append(exe)
@@ -2577,7 +2688,7 @@ def show_platforms_ui():
     if _focus_existing("platforms"):
         return
 
-    plat_win = _make_settings_window("platforms", "Gaming Status Agent - Platforms", "430x360")
+    plat_win = _make_settings_window("platforms", "Gaming Status Agent - Platforms", "430x440")
 
     tk.Label(plat_win, text="Which platforms should be tracked?",
              font=("", 9, "bold")).grid(row=0, column=0, columnspan=2,

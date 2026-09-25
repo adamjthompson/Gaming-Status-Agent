@@ -80,7 +80,13 @@ Gaming Status Agent uses whichever source knows the game's real name, in this or
 5. **Xbox / Microsoft Store** *(off by default)* — reads installed Store
    packages from the app registry, keeps the ones carrying a game manifest, and
    matches any process running from inside a package folder.
-6. **Window ancestry** — for everything else, finds a visible window whose
+6. **Riot Games, HoYoverse and Minecraft** *(off by default)* — matched by the
+   game's own executable, so lobbies and launchers never count as playing.
+   League of Legends and Teamfight Tactics share one executable; the game's
+   local Live Client Data API tells them apart once a match has loaded.
+   Minecraft Java is recognised by a `javaw.exe` window titled "Minecraft",
+   which covers the official launcher, CurseForge, Prism and MultiMC alike.
+7. **Window ancestry** — for everything else, finds a visible window whose
    process descends from a known launcher and uses its title.
 
 Sources that know a game's real name outrank raw window titles, so a
@@ -112,6 +118,12 @@ two entities reporting the same session.
 While Steam is off, anything launched through Steam is ignored, Playnite-launched
 Steam games included. A **Custom Games** rule still overrides that, because it's
 deliberate configuration rather than automatic detection.
+
+### Riot Games, HoYoverse and Minecraft are opt-in
+
+These are matched by fixed executable names rather than a launcher's own
+records, so they stay off until you switch them on under **Platforms**. Once
+HoYoverse is on, a Custom Games rule for `genshinimpact.exe` is no longer needed.
 
 ### What Playnite does and doesn't cover
 
@@ -147,6 +159,9 @@ here because they're handy to set when deploying the same config to several PCs:
 | `ENABLE_CUSTOM` | `false` |
 | `ENABLE_STEAM` | `false` |
 | `ENABLE_XBOX` | `false` |
+| `ENABLE_RIOT` | `false` |
+| `ENABLE_HOYOVERSE` | `false` |
+| `ENABLE_MINECRAFT` | `false` |
 
 A switched-off platform is skipped completely — its registry and manifest scans
 never run at startup, and the poller doesn't check it each tick. Turning off
