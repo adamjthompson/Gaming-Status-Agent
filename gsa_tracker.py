@@ -23,7 +23,7 @@ import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.1.9"
+GSA_VERSION = "1.2.0"
 
 # --- GLOBALS & PATHS ---
 client = None
