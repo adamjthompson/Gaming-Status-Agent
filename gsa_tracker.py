@@ -2516,20 +2516,11 @@ def restart_services():
 def check_initial_config():
     global CONFIG
 
+    # load_config() with no file returns the defaults, which the wizard edits
+    # in place. The wizard always writes the file, so it runs only once.
+    CONFIG = load_config()
     if not os.path.exists(CONFIG_FILE):
-        save_config(DEFAULT_CONFIG)
-        CONFIG = load_config()
-        messagebox.showinfo(
-            "Gaming Status Agent First Run",
-            f"A default configuration has been created.\n\n"
-            f"Device name: {CONFIG.get('HA_DEVICE_NAME')}\n"
-            f"This becomes your Home Assistant sensor "
-            f"(sensor.gsa_{sanitize_topic_part(CONFIG.get('HA_DEVICE_NAME', ''))}).\n\n"
-            f"Gaming Status Agent is now running in your System Tray. Right-click the icon to set "
-            f"your MQTT broker, change the device name, or choose which Platforms to track."
-        )
-    else:
-        CONFIG = load_config()
+        run_setup_wizard()
 
 
 def _focus_existing(name):
@@ -2579,57 +2570,76 @@ def _finish_settings_window(win, row, on_save):
     win.after_idle(win.attributes, '-topmost', False)
 
 
+MQTT_FIELDS = [
+    ("HA_DEVICE_NAME", "HA Device Name"),
+    ("MQTT_BROKER", "MQTT Broker IP"),
+    ("MQTT_PORT", "MQTT Port"),
+    ("MQTT_USER", "MQTT Username"),
+    ("MQTT_PASS", "MQTT Password"),
+    ("POLL_INTERVAL", "Universal Poller Rate (s)")
+]
+
+
+def _add_mqtt_rows(win, row=0):
+    """The MQTT Settings fields, shared by the tray window and the wizard.
+
+    Returns (entry vars, TLS var, CA cert var, next row).
+    """
+    vars_dict, row = _add_entry_rows(win, MQTT_FIELDS, row)
+
+    tls_var = tk.BooleanVar(value=bool(CONFIG.get("MQTT_TLS", False)))
+    tk.Checkbutton(win, text="Use TLS (port is usually 8883)",
+                   variable=tls_var).grid(row=row, column=1, padx=10, pady=4, sticky="w")
+    row += 1
+
+    tk.Label(win, text="CA Cert (optional)").grid(row=row, column=0, padx=15, pady=8, sticky="e")
+    ca_var = tk.StringVar(value=str(CONFIG.get("MQTT_CA_CERT", "")))
+    tk.Entry(win, textvariable=ca_var, width=32).grid(row=row, column=1, padx=10, pady=8, sticky="w")
+    row += 1
+    return vars_dict, tls_var, ca_var, row
+
+
+def _apply_mqtt_values(vars_dict, tls_var, ca_var, parent=None):
+    """Copy the MQTT fields into CONFIG. Returns False, having said why, if the
+    device name is blank; nothing is changed in that case."""
+    # Checked before anything is written: clearing this field moved the
+    # sensor to the generic sensor.gsa_user topic and emptied Profile Name,
+    # with no indication that either had happened.
+    if not _clean_name(vars_dict["HA_DEVICE_NAME"].get()):
+        messagebox.showerror(
+            "Error",
+            "HA Device Name cannot be empty.\n\n"
+            "It becomes your Home Assistant sensor name and the MQTT topic.",
+            parent=parent)
+        return False
+
+    for key, _ in MQTT_FIELDS:
+        val = vars_dict[key].get()
+        if key == "MQTT_PORT":
+            val = _coerce_int(val, 1883, 1, 65535)
+        elif key == "POLL_INTERVAL":
+            val = _coerce_int(val, 5, 1, 3600)
+        elif key in ("HA_DEVICE_NAME", "MQTT_BROKER", "MQTT_USER"):
+            # A trailing space in the broker address fails to connect with
+            # a DNS error that gives no hint of the real cause.
+            val = _clean_name(val)
+        CONFIG[key] = val
+
+    CONFIG["MQTT_TLS"] = bool(tls_var.get())
+    CONFIG["MQTT_CA_CERT"] = ca_var.get().strip()
+    return True
+
+
 def show_settings_ui():
     if _focus_existing("settings"):
         return
 
     settings_win = _make_settings_window("settings", "Gaming Status Agent - MQTT Settings", "430x400")
-
-    fields = [
-        ("HA_DEVICE_NAME", "HA Device Name"),
-        ("MQTT_BROKER", "MQTT Broker IP"),
-        ("MQTT_PORT", "MQTT Port"),
-        ("MQTT_USER", "MQTT Username"),
-        ("MQTT_PASS", "MQTT Password"),
-        ("POLL_INTERVAL", "Universal Poller Rate (s)")
-    ]
-    vars_dict, row = _add_entry_rows(settings_win, fields)
-
-    tls_var = tk.BooleanVar(value=bool(CONFIG.get("MQTT_TLS", False)))
-    tk.Checkbutton(settings_win, text="Use TLS (port is usually 8883)",
-                   variable=tls_var).grid(row=row, column=1, padx=10, pady=4, sticky="w")
-    row += 1
-
-    tk.Label(settings_win, text="CA Cert (optional)").grid(row=row, column=0, padx=15, pady=8, sticky="e")
-    ca_var = tk.StringVar(value=str(CONFIG.get("MQTT_CA_CERT", "")))
-    tk.Entry(settings_win, textvariable=ca_var, width=32).grid(row=row, column=1, padx=10, pady=8, sticky="w")
-    row += 1
+    vars_dict, tls_var, ca_var, row = _add_mqtt_rows(settings_win)
 
     def save_settings():
-        # Checked before anything is written: clearing this field moved the
-        # sensor to the generic sensor.gsa_user topic and emptied Profile Name,
-        # with no indication that either had happened.
-        if not _clean_name(vars_dict["HA_DEVICE_NAME"].get()):
-            messagebox.showerror(
-                "Error",
-                "HA Device Name cannot be empty.\n\n"
-                "It becomes your Home Assistant sensor name and the MQTT topic.")
+        if not _apply_mqtt_values(vars_dict, tls_var, ca_var, parent=settings_win):
             return
-
-        for key, _ in fields:
-            val = vars_dict[key].get()
-            if key == "MQTT_PORT":
-                val = _coerce_int(val, 1883, 1, 65535)
-            elif key == "POLL_INTERVAL":
-                val = _coerce_int(val, 5, 1, 3600)
-            elif key in ("HA_DEVICE_NAME", "MQTT_BROKER", "MQTT_USER"):
-                # A trailing space in the broker address fails to connect with
-                # a DNS error that gives no hint of the real cause.
-                val = _clean_name(val)
-            CONFIG[key] = val
-
-        CONFIG["MQTT_TLS"] = bool(tls_var.get())
-        CONFIG["MQTT_CA_CERT"] = ca_var.get().strip()
 
         if not save_config():
             messagebox.showerror("Error", "Could not save settings. See gsa_debug.log for details.")
@@ -2646,15 +2656,17 @@ def open_settings(icon, item):
     ROOT.after(0, show_settings_ui)
 
 
-def gamertag_fields():
+def gamertag_fields(enabled=None):
     """(config key, platform name) for each tracked platform that has a gamertag.
 
     Listed in PLATFORM_ORDER, and only while the platform is switched on: a
     gamertag for something that is not being tracked is never published, so
     showing the field would only invite filling in a box that does nothing.
+    The wizard passes its not-yet-saved selection as enabled, a set of labels.
     """
+    is_on = platform_enabled if enabled is None else (lambda name: name in enabled)
     return [(LAUNCHER_PROFILE_KEYS[name], name) for name in PLATFORM_ORDER
-            if name in LAUNCHER_PROFILE_KEYS and platform_enabled(name)]
+            if name in LAUNCHER_PROFILE_KEYS and is_on(name)]
 
 
 def show_gamertags_ui():
@@ -2698,6 +2710,29 @@ def open_gamertags(icon, item):
     ROOT.after(0, show_gamertags_ui)
 
 
+def _add_platform_checks(win, row, notes=None):
+    """One checkbox per platform, ticked from CONFIG, in PLATFORM_ORDER.
+
+    notes maps a label to text shown after its name. Returns ({label: var},
+    next row). Shared by the tray window and the wizard.
+    """
+    notes = notes or {}
+    vars_dict = {}
+    for label in PLATFORM_ORDER:
+        var = tk.BooleanVar(value=platform_enabled(label))
+        vars_dict[label] = var
+        text = f"{label}  ({notes[label]})" if label in notes else label
+        tk.Checkbutton(win, text=text, variable=var).grid(
+            row=row, column=0, columnspan=2, padx=15, sticky="w")
+        row += 1
+    return vars_dict, row
+
+
+def _apply_platform_values(vars_dict):
+    for label, var in vars_dict.items():
+        CONFIG[PLATFORM_ENABLE_KEYS[label]] = bool(var.get())
+
+
 def show_platforms_ui():
     if _focus_existing("platforms"):
         return
@@ -2708,19 +2743,10 @@ def show_platforms_ui():
              font=("", 9, "bold")).grid(row=0, column=0, columnspan=2,
                                         padx=15, pady=(12, 6), sticky="w")
 
-    row = 1
-    vars_dict = {}
-    for label in PLATFORM_ORDER:
-        key = PLATFORM_ENABLE_KEYS[label]
-        var = tk.BooleanVar(value=platform_enabled(label))
-        vars_dict[key] = var
-        tk.Checkbutton(plat_win, text=label, variable=var).grid(
-            row=row, column=0, columnspan=2, padx=15, sticky="w")
-        row += 1
+    vars_dict, row = _add_platform_checks(plat_win, 1)
 
     def save_platforms():
-        for key, var in vars_dict.items():
-            CONFIG[key] = bool(var.get())
+        _apply_platform_values(vars_dict)
 
         if not save_config():
             messagebox.showerror("Error", "Could not save settings. See gsa_debug.log for details.")
@@ -2975,19 +3001,277 @@ def startup_enabled(item=None):
         return False
 
 
-def toggle_startup(icon, item):
+def set_startup(enabled):
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_REG_PATH, 0,
                             winreg.KEY_SET_VALUE) as key:
-            if startup_enabled():
-                winreg.DeleteValue(key, RUN_VALUE_NAME)
-                debug_log("Start at login disabled.")
-            else:
+            if enabled:
                 winreg.SetValueEx(key, RUN_VALUE_NAME, 0, winreg.REG_SZ,
                                   startup_command())
                 debug_log("Start at login enabled.")
+            elif startup_enabled():
+                winreg.DeleteValue(key, RUN_VALUE_NAME)
+                debug_log("Start at login disabled.")
     except OSError as e:
         debug_log(f"Could not change start at login: {e}")
+
+
+def toggle_startup(icon, item):
+    set_startup(not startup_enabled())
+
+
+# --- FIRST-RUN SETUP ---
+# Found on this PC but never switched on automatically: each has an official
+# Home Assistant integration, so turning them on unasked would publish a
+# second, competing sensor for the same play session.
+NEVER_AUTO_ENABLE = {"Steam", "Xbox"}
+
+
+def _reg_key_exists(hive, path):
+    try:
+        with winreg.OpenKey(hive, path):
+            return True
+    except OSError:
+        return False
+
+
+def _any_path_exists(*parts_list):
+    return any(parts and all(parts) and os.path.exists(os.path.join(*parts))
+               for parts in parts_list)
+
+
+def _store_package_names():
+    """Lower-cased names of installed Store packages, without opening each key."""
+    names = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, APPMODEL_REG_PATH) as parent:
+            for i in range(winreg.QueryInfoKey(parent)[0]):
+                try:
+                    names.append(winreg.EnumKey(parent, i).lower())
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return names
+
+
+def _uninstall_display_names():
+    names = []
+    for hive, reg_path in UNINSTALL_REG_PATHS:
+        for _, sub in _enum_subkeys(hive, reg_path):
+            name = _reg_value(sub, "DisplayName").lower()
+            if name:
+                names.append(name)
+    return names
+
+
+def detect_installed_platforms():
+    """Platform labels whose launcher or games are installed on this PC.
+
+    Cheap existence checks only: no process scans and no game databases. Each
+    check is isolated, so one surprise cannot stop first run.
+    """
+    env = os.environ.get
+    appdata, local, progdata = env("APPDATA", ""), LOCAL_APPDATA, PROGRAM_DATA
+    progfiles, progfiles86 = env("ProgramFiles", ""), env("ProgramFiles(x86)", "")
+    home = env("USERPROFILE", "")
+
+    uninstall_cache = []
+
+    def uninstall_names():
+        if not uninstall_cache:
+            uninstall_cache.append(_uninstall_display_names())
+        return uninstall_cache[0]
+
+    packages_cache = []
+
+    def packages():
+        if not packages_cache:
+            packages_cache.append(_store_package_names())
+        return packages_cache[0]
+
+    hoyo_titles = {title.lower() for title, owner in KNOWN_GAME_EXES.values()
+                   if owner == "HoYoverse"}
+
+    checks = {
+        "Epic": lambda: os.path.isdir(EPIC_MANIFEST_DIR),
+        "Ubisoft": lambda: _reg_key_exists(
+            winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Ubisoft\Launcher"),
+        "GOG": lambda: any(_reg_key_exists(h, p) for h, p in GOG_REG_PATHS)
+            or _reg_key_exists(winreg.HKEY_LOCAL_MACHINE,
+                               r"SOFTWARE\WOW6432Node\GOG.com\GalaxyClient"),
+        "Battle.net": lambda: _any_path_exists((progfiles86, "Battle.net"))
+            or any(n in BATTLENET_CLIENT_NAMES for n in uninstall_names()),
+        "EA": lambda: _any_path_exists((progfiles, "Electronic Arts", "EA Desktop"))
+            or _reg_key_exists(winreg.HKEY_LOCAL_MACHINE,
+                               r"SOFTWARE\Electronic Arts\EA Desktop"),
+        "Amazon Games": lambda: _any_path_exists((local, "Amazon Games", "App")),
+        "Playnite": lambda: _any_path_exists((appdata, "Playnite"), (local, "Playnite")),
+        "Riot Games": lambda: _any_path_exists(
+            (progdata, "Riot Games", "RiotClientInstalls.json")),
+        "HoYoverse": lambda: _reg_key_exists(
+            winreg.HKEY_CURRENT_USER, r"Software\Cognosphere\HYP")
+            or any("hoyoplay" in n or n in hoyo_titles for n in uninstall_names()),
+        "Minecraft": lambda: _any_path_exists(
+            (appdata, ".minecraft"), (progfiles86, "Minecraft Launcher"),
+            (home, "curseforge", "minecraft"))
+            or any(p.startswith(("microsoft.4297127d64ec6_", "microsoft.minecraftuwp_"))
+                   for p in packages()),
+        "Roblox": lambda: _any_path_exists(
+            (local, "Roblox", "Versions"), (local, "Bloxstrap"), (local, "Fishstrap")),
+        "Steam": lambda: _reg_key_exists(winreg.HKEY_CURRENT_USER, STEAM_REG_PATH),
+        "Xbox": lambda: any(p.startswith("microsoft.gamingapp_") for p in packages()),
+    }
+
+    found = set()
+    for label, check in checks.items():
+        try:
+            if check():
+                found.add(label)
+        except Exception as e:
+            debug_log(f"Setup: could not check for {label}: {e}")
+    debug_log(f"Setup: found {', '.join(sorted(found)) or 'no launchers'}.")
+    return found
+
+
+def run_setup_wizard():
+    """First-run setup: MQTT Settings, then Platforms, then Gamertags.
+
+    Blocks until closed; called before start_services() and before the Tk main
+    loop starts, which wait_window() allows. Finish and Cancel both write the
+    config, so it runs once. Cancel keeps whatever pages were already applied,
+    including the auto-detected platforms.
+    """
+    found = detect_installed_platforms()
+    for label in PLATFORM_ORDER:
+        CONFIG[PLATFORM_ENABLE_KEYS[label]] = label in found and label not in NEVER_AUTO_ENABLE
+
+    win = tk.Toplevel(ROOT)
+    win.title("Gaming Status Agent Setup")
+    win.geometry("480x590")
+    win.resizable(False, False)
+    win.attributes('-topmost', True)
+
+    body = tk.Frame(win)
+    body.pack(fill=tk.BOTH, expand=True)
+    pages = [tk.Frame(body) for _ in range(3)]
+
+    def heading(page, text, detail=""):
+        tk.Label(page, text=text, font=("", 10, "bold")).grid(
+            row=0, column=0, columnspan=2, padx=15, pady=(14, 2), sticky="w")
+        if detail:
+            tk.Label(page, text=detail, justify="left", wraplength=440).grid(
+                row=1, column=0, columnspan=2, padx=15, pady=(0, 8), sticky="w")
+        return 2
+
+    # Page 1: MQTT
+    row = heading(pages[0], "Step 1 of 3: Connect to Home Assistant",
+                  "Enter your MQTT broker. The device name becomes your Home "
+                  "Assistant sensor.")
+    mqtt_vars, tls_var, ca_var, _ = _add_mqtt_rows(pages[0], row)
+
+    # Page 2: Platforms
+    row = heading(pages[1], "Step 2 of 3: Platforms",
+                  "Launchers found on this PC are switched on. Steam and Xbox "
+                  "stay off because Home Assistant has its own integrations for "
+                  "them; switch them on if you want this sensor to cover them.")
+    notes = {label: "found, off by default"
+             for label in found & NEVER_AUTO_ENABLE}
+    notes.update({label: "found" for label in found - NEVER_AUTO_ENABLE})
+    platform_vars, _ = _add_platform_checks(pages[1], row, notes)
+
+    # Page 3: Gamertags, rebuilt from page 2's selection each time it is shown.
+    gamertag_vars = {}
+    login_var = tk.BooleanVar(value=True)
+
+    def build_gamertags_page():
+        page = pages[2]
+        for child in page.winfo_children():
+            child.destroy()
+        row = heading(page, "Step 3 of 3: Gamertags (optional)",
+                      "Shown as the sensor's Profile Name. Leave any blank to use "
+                      "the device name.")
+        enabled = {label for label, var in platform_vars.items() if var.get()}
+        fields = gamertag_fields(enabled)
+        if not fields:
+            tk.Label(page, text="None of the selected platforms uses a gamertag.").grid(
+                row=row, column=0, columnspan=2, padx=15, pady=8, sticky="w")
+            row += 1
+        for key, label_text in fields:
+            var = gamertag_vars.setdefault(key, tk.StringVar(value=str(CONFIG.get(key, ""))))
+            tk.Label(page, text=label_text).grid(row=row, column=0, padx=15, pady=6, sticky="e")
+            tk.Entry(page, textvariable=var, width=32).grid(
+                row=row, column=1, padx=10, pady=6, sticky="w")
+            row += 1
+        tk.Checkbutton(page, text="Start Gaming Status Agent at login",
+                       variable=login_var).grid(
+            row=row, column=0, columnspan=2, padx=15, pady=(14, 4), sticky="w")
+        row += 1
+        sensor = sanitize_topic_part(mqtt_vars["HA_DEVICE_NAME"].get())
+        tk.Label(page, justify="left", wraplength=440,
+                 text=f"Your sensor will be sensor.gsa_{sensor}. Gaming Status "
+                      f"Agent runs in the system tray; right-click its icon to "
+                      f"change any of this later.").grid(
+            row=row, column=0, columnspan=2, padx=15, pady=4, sticky="w")
+
+    state = {"page": 0}
+    buttons = tk.Frame(win)
+    buttons.pack(fill=tk.X, side=tk.BOTTOM, pady=10)
+
+    def show(index):
+        for page in pages:
+            page.pack_forget()
+        if index == 2:
+            build_gamertags_page()
+        pages[index].pack(fill=tk.BOTH, expand=True)
+        state["page"] = index
+        back_btn.config(state=tk.DISABLED if index == 0 else tk.NORMAL)
+        next_btn.config(text="Finish" if index == 2 else "Next >")
+
+    def save_and_close():
+        if not save_config():
+            messagebox.showerror("Error", "Could not save settings. See "
+                                 "gsa_debug.log for details.", parent=win)
+            return False
+        win.destroy()
+        return True
+
+    def go_next():
+        if state["page"] == 0:
+            if not _apply_mqtt_values(mqtt_vars, tls_var, ca_var, parent=win):
+                return
+        elif state["page"] == 1:
+            _apply_platform_values(platform_vars)
+        else:
+            _apply_platform_values(platform_vars)
+            enabled = {label for label, var in platform_vars.items() if var.get()}
+            for key, _ in gamertag_fields(enabled):
+                CONFIG[key] = gamertag_vars[key].get().strip()
+            if save_and_close():
+                set_startup(login_var.get())
+                debug_log("Setup finished.")
+            return
+        show(state["page"] + 1)
+
+    def cancel():
+        # Keep what was already applied rather than discarding it; everything
+        # stays editable from the tray menu.
+        debug_log("Setup cancelled; saving defaults and detected platforms.")
+        if not save_and_close():
+            win.destroy()
+
+    tk.Button(buttons, text="Cancel", width=10, command=cancel).pack(side=tk.RIGHT, padx=(6, 15))
+    next_btn = tk.Button(buttons, text="Next >", width=10, command=go_next)
+    next_btn.pack(side=tk.RIGHT, padx=6)
+    back_btn = tk.Button(buttons, text="< Back", width=10,
+                         command=lambda: show(state["page"] - 1))
+    back_btn.pack(side=tk.RIGHT, padx=6)
+    win.protocol("WM_DELETE_WINDOW", cancel)
+
+    show(0)
+    win.focus_force()
+    win.after_idle(win.attributes, '-topmost', False)
+    ROOT.wait_window(win)
 
 
 def create_tray_menu():

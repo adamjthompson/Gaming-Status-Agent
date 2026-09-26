@@ -18,7 +18,7 @@ Home Assistant discovers the sensor automatically. No YAML required.
 ## Install
 
 **From a release:** download `Gaming Status Agent.exe`, put it anywhere you like, and run it.
-It creates its config file next to itself, so a dedicated folder is tidiest. Adding it to your startup items is recommended as well.
+It creates its config file next to itself, so a dedicated folder is tidiest.
 
 **From source:**
 
@@ -27,9 +27,19 @@ pip install -r requirements.txt
 python gsa_tracker.py
 ```
 
-On first run Gaming Status Agent writes `gsa_config.json`, shows you the device name it chose
-(taken from your Windows account), and puts a controller icon in your system
-tray. Right-click it and open **MQTT Settings** to enter your broker address.
+On first run a short setup wizard walks you through three pages:
+
+1. **MQTT Settings** — your broker address and login. The device name starts as
+   your Windows account name and becomes the Home Assistant sensor.
+2. **Platforms** — launchers found on this PC are already switched on. Steam and
+   Xbox are marked if found but stay off (see below).
+3. **Gamertags** — optional, one per selected platform, plus a **Start at login**
+   option that is ticked by default.
+
+**Finish** writes `gsa_config.json` and puts a controller icon in your system
+tray. **Cancel** still saves the detected platforms and anything already
+entered, so the wizard runs only once; every setting stays editable from the
+tray menu.
 
 ## The tray menu
 
