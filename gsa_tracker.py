@@ -400,6 +400,22 @@ LAUNCHER_FAMILY_TOKENS = (
 # automatic detection.
 EXCLUDED_ANCESTOR_EXES = {"steam.exe"}
 
+# Programs whose windows are never a game, whatever their ancestry says. Window
+# ancestry publishes a window's raw title, so a misattributed editor, document
+# or chat window would otherwise send its title (a file name, a conversation)
+# to Home Assistant. Checked on the window's own process, not its parents.
+NON_GAME_EXES = {
+    "notepad.exe", "notepad++.exe", "code.exe", "code - insiders.exe",
+    "sublime_text.exe", "devenv.exe", "idea64.exe", "pycharm64.exe",
+    "winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "onenote.exe",
+    "msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe",
+    "vivaldi.exe", "discord.exe", "slack.exe", "teams.exe", "ms-teams.exe",
+    "explorer.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
+    "windowsterminal.exe", "conhost.exe", "taskmgr.exe", "mmc.exe",
+    "regedit.exe", "acrord32.exe", "acrobat.exe", "wordpad.exe",
+    "python.exe", "pythonw.exe", "obs64.exe", "spotify.exe",
+}
+
 BROWSER_SUFFIXES = (
     " - google chrome", " - mozilla firefox", " - microsoft edge",
     " - brave", " - opera", " - vivaldi", " - youtube", " - discord"
@@ -593,14 +609,14 @@ def load_config():
         merged[enable_key] = bool(raw)
     merged["MQTT_PASS"] = decrypt_secret(merged.get("MQTT_PASS", ""))
 
-    # Only http(s) is fetchable here. Anything else - file://, ftp://, a bare
-    # path, a non-string - silently becomes the default rather than being handed
-    # to urlopen.
+    # Only https is fetchable here. Plain http let anyone on the network rewrite
+    # the game names, and file://, ftp://, a bare path or a non-string would be
+    # handed straight to urlopen; all of them silently become the default.
     catalog = merged.get("CATALOG_URL")
     catalog = catalog.strip() if isinstance(catalog, str) else ""
-    if not catalog.lower().startswith(("https://", "http://")):
+    if not catalog.lower().startswith("https://"):
         if catalog:
-            debug_log(f"Ignoring CATALOG_URL {catalog!r}: only http(s) URLs are allowed.")
+            debug_log(f"Ignoring CATALOG_URL {catalog!r}: only https URLs are allowed.")
         catalog = DEFAULT_CATALOG_URL
     merged["CATALOG_URL"] = catalog
 
@@ -778,12 +794,8 @@ def find_game_by_install_dir(processes, dir_map):
     """Return the name of a running game located inside a known install folder."""
     if not dir_map:
         return None
-    for exe_name, exe_path in processes:
-        if not exe_path or exe_name in IGNORE_EXES:
-            continue
-        try:
-            resolved = os.path.normcase(os.path.abspath(exe_path))
-        except Exception:
+    for exe_name, _, resolved in processes:
+        if not resolved or exe_name in IGNORE_EXES:
             continue
         for install_dir, name in dir_map.items():
             if resolved.startswith(install_dir):
@@ -806,7 +818,7 @@ def find_xbox_games_folder_game(processes):
     name is used, preferring the scanned display name when they agree.
     """
     names_by_folder = {_clean_xbox_title(n).lower(): n for n in XBOX_BY_DIR.values()}
-    for exe_name, exe_path in processes:
+    for exe_name, exe_path, _ in processes:
         if not exe_path or exe_name in IGNORE_EXES:
             continue
         parts = os.path.normpath(exe_path).split(os.sep)
@@ -842,7 +854,7 @@ def find_xbox_game(processes):
     found = find_xbox_games_folder_game(processes)
     if found or not XBOX_BY_DIR:
         return found
-    for exe_name, exe_path in processes:
+    for exe_name, exe_path, _ in processes:
         if exe_path or not exe_name or exe_name in IGNORE_EXES:
             continue
         for root, name in XBOX_BY_DIR.items():
@@ -857,17 +869,15 @@ def find_xbox_game(processes):
 def find_gog_game(processes):
     """Return the name of a running GOG game, or None.
 
-    processes is a list of (exe_name_lower, full_path_or_None).
+    processes is a list of (exe_name_lower, full_path, normalised_path).
     """
-    for _, exe_path in processes:
-        if exe_path:
-            key = os.path.normcase(os.path.abspath(exe_path))
-            if key in GOG_BY_PATH:
-                return GOG_BY_PATH[key]
+    for _, _, key in processes:
+        if key and key in GOG_BY_PATH:
+            return GOG_BY_PATH[key]
 
     # Elevated games hide their path from psutil, and a game moved after install
     # no longer matches by path, so fall back to the executable name.
-    for exe_name, _ in processes:
+    for exe_name, _, _ in processes:
         if exe_name in GOG_BY_NAME:
             return GOG_BY_NAME[exe_name]
     return None
@@ -1024,16 +1034,22 @@ def find_steam_running_game():
     """
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STEAM_REG_PATH) as key:
-            running_appid = str(_reg_value(key, "RunningAppID") or "0").strip()
+            value, _ = winreg.QueryValueEx(key, "RunningAppID")
+            running_appid = str(value).strip()
     except OSError:
-        running_appid = "0"
+        running_appid = None
 
-    if running_appid and running_appid != "0":
-        return STEAM_BY_APPID.get(running_appid) or f"Steam App {running_appid}"
+    if running_appid is not None:
+        # Present means authoritative: 0 is Steam saying nothing is running.
+        if running_appid and running_appid != "0":
+            return STEAM_BY_APPID.get(running_appid) or f"Steam App {running_appid}"
+        return None
 
     # RunningAppID is not written by every client build, so fall back to the
     # per-game Running flag. These keys also carry the name, which covers a
-    # game that has no manifest in any library we could read.
+    # game that has no manifest in any library we could read. This walks every
+    # app key, so it runs only for those builds, never merely because nothing
+    # is running.
     for appid, sub in _enum_subkeys(winreg.HKEY_CURRENT_USER, STEAM_APPS_REG_PATH):
         try:
             if _reg_value(sub, "Running") not in ("1", "True"):
@@ -1209,6 +1225,10 @@ def get_ubisoft_registry_names():
     return mapping, unmatched
 
 
+class _CatalogFresh(Exception):
+    """The in-memory catalog is recent enough; skips the download."""
+
+
 def _flatten_catalog(raw_data):
     """Catalog is {category: {id: title}}, with a legacy flat {id: title} form."""
     mapping = {}
@@ -1223,6 +1243,13 @@ def _flatten_catalog(raw_data):
     return mapping
 
 
+# The downloaded catalog, kept between restarts. Every Save & Apply restarts the
+# services, and re-downloading each time held the settings window for up to the
+# full timeout. Refreshed when older than this, or when the URL changes.
+CATALOG_MAX_AGE_SECONDS = 6 * 3600
+_CATALOG_CACHE = {"url": None, "mapping": None, "fetched": 0.0}
+
+
 def get_ubisoft_info():
     mapping = {}
     log_dir = r"C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\logs"
@@ -1235,7 +1262,12 @@ def get_ubisoft_info():
 
     # 1. Fetch Latest Community Database
     catalog_url = CONFIG.get("CATALOG_URL") or DEFAULT_CATALOG_URL
+    cached_catalog = _CATALOG_CACHE["mapping"]
     try:
+        if (cached_catalog and _CATALOG_CACHE["url"] == catalog_url
+                and time.monotonic() - _CATALOG_CACHE["fetched"] < CATALOG_MAX_AGE_SECONDS):
+            mapping = dict(cached_catalog)
+            raise _CatalogFresh()
         req = urllib.request.Request(
             catalog_url,
             headers={'User-Agent': 'Gaming-Status-Agent/1.0'}
@@ -1248,6 +1280,8 @@ def get_ubisoft_info():
             mapping = _flatten_catalog(json.loads(content.decode('utf-8')))
 
         if mapping:
+            _CATALOG_CACHE.update({"url": catalog_url, "mapping": dict(mapping),
+                                   "fetched": time.monotonic()})
             try:
                 with open(UBI_CACHE_FILE, 'w', encoding='utf-8') as f:
                     json.dump(mapping, f, indent=4)
@@ -1255,6 +1289,8 @@ def get_ubisoft_info():
                 debug_log(f"Could not write Ubisoft cache: {e}")
             debug_log(f"Successfully downloaded remote Ubisoft database ({len(mapping)} games).")
 
+    except _CatalogFresh:
+        pass
     except Exception as e:
         debug_log(f"Failed to fetch Ubisoft catalog from {catalog_url}: {e}")
         if os.path.exists(UBI_CACHE_FILE):
@@ -1300,10 +1336,17 @@ def get_ubisoft_info():
     return log_dir, mapping
 
 
-def get_active_window_titles():
-    user32 = ctypes.windll.user32
+_EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+_USER32 = None
 
-    EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+def _user32():
+    """user32 with its signatures declared, set up once rather than every poll."""
+    global _USER32
+    if _USER32 is not None:
+        return _USER32
+    user32 = ctypes.windll.user32
+    EnumWindowsProc = _EnumWindowsProc
 
     user32.EnumWindows.argtypes = [EnumWindowsProc, wintypes.LPARAM]
     user32.EnumWindows.restype = wintypes.BOOL
@@ -1325,7 +1368,12 @@ def get_active_window_titles():
     user32.IsIconic.restype = wintypes.BOOL
     user32.GetWindowPlacement.argtypes = [wintypes.HWND, ctypes.POINTER(_WindowPlacement)]
     user32.GetWindowPlacement.restype = wintypes.BOOL
+    _USER32 = user32
+    return user32
 
+
+def get_active_window_titles():
+    user32 = _user32()
     titles = []
 
     def foreach_window(hwnd, lParam):
@@ -1375,7 +1423,7 @@ def get_active_window_titles():
         return True
 
     try:
-        user32.EnumWindows(EnumWindowsProc(foreach_window), 0)
+        user32.EnumWindows(_EnumWindowsProc(foreach_window), 0)
     except Exception as e:
         debug_log(f"EnumWindows failed: {e}")
     return titles
@@ -1703,7 +1751,7 @@ def ancestor_names(pid, snapshot):
 
 def find_launcher_ancestor(pid, snapshot):
     info = snapshot.get(pid)
-    if not info or info[1] in IGNORE_EXES:
+    if not info or info[1] in IGNORE_EXES or info[1] in NON_GAME_EXES:
         return None
     for name in ancestor_names(pid, snapshot):
         # Checked before the launcher table so that the nearest ancestor wins.
@@ -1730,8 +1778,10 @@ def snapshot_processes():
 
     Returns (snapshot, processes, running_exes) where snapshot maps
     pid -> (ppid, exe_name, create_time) and processes is a list of
-    (exe_name, full_path). 'exe' is None where the path cannot be read, and
-    create_time is 0 where it cannot; psutil does not raise for either.
+    (exe_name, full_path, normalised_path). The path is normalised here, once
+    per poll, because several detectors compare it against install folders.
+    Both paths are None where it cannot be read, and create_time is 0 where it
+    cannot; psutil does not raise for either.
     """
     snapshot = {}
     processes = []
@@ -1745,7 +1795,14 @@ def snapshot_processes():
                                          info.get('create_time') or 0)
             if name:
                 running_exes.add(name)
-                processes.append((name, info.get('exe')))
+                exe_path = info.get('exe')
+                normalised = None
+                if exe_path:
+                    try:
+                        normalised = os.path.normcase(os.path.abspath(exe_path))
+                    except Exception:
+                        exe_path = None
+                processes.append((name, exe_path, normalised))
     except Exception as e:
         debug_log(f"Could not enumerate processes: {e}")
     return snapshot, processes, running_exes
@@ -1802,7 +1859,10 @@ MINECRAFT_JAVA_EXES = {"javaw.exe", "java.exe"}
 # self-signed certificate, hence no verification.
 LEAGUE_GAMESTATS_URL = "https://127.0.0.1:2999/liveclientdata/gamestats"
 LEAGUE_MODE_CACHE_SECONDS = 30
-_LEAGUE_MODE = {"title": None, "checked": 0.0}
+# While a match loads the API does not answer, and each attempt can hold the
+# poll for its whole timeout; wait this long before asking again.
+LEAGUE_MODE_RETRY_SECONDS = 15
+_LEAGUE_MODE = {"title": None, "checked": 0.0, "failed": -1e9}
 
 
 def league_mode_title():
@@ -1811,6 +1871,8 @@ def league_mode_title():
     if _LEAGUE_MODE["title"] and now - _LEAGUE_MODE["checked"] < LEAGUE_MODE_CACHE_SECONDS:
         return _LEAGUE_MODE["title"]
     title = "League of Legends"
+    if now - _LEAGUE_MODE["failed"] < LEAGUE_MODE_RETRY_SECONDS:
+        return _LEAGUE_MODE["title"] or title
     try:
         import ssl
         context = ssl.create_default_context()
@@ -1825,7 +1887,8 @@ def league_mode_title():
         # API is down, and the next poll should ask again.
         _LEAGUE_MODE.update({"title": title, "checked": now})
     except Exception:
-        pass
+        _LEAGUE_MODE["failed"] = now
+        return _LEAGUE_MODE["title"] or title
     return title
 
 
@@ -2183,6 +2246,8 @@ def build_diagnostic_report():
             note = "skipped: browser/Discord-like title"
         elif own_exe in IGNORE_EXES:
             note = "skipped: launcher or helper process, not a game"
+        elif own_exe in NON_GAME_EXES:
+            note = "skipped: known non-game program, title never published"
         elif not verdict:
             excluded = [n for n in chain if n in ACTIVE_EXCLUSIONS]
             off = [LAUNCHERS[n] for n in chain
@@ -2507,9 +2572,26 @@ def start_services():
     debug_log("Universal Game Poller started successfully")
 
 
+# Serialises restarts. Two quick saves must not interleave stop and start.
+RESTART_LOCK = threading.Lock()
+
+
 def restart_services():
-    stop_services()
-    start_services()
+    """Restart in the background so a settings window closes at once.
+
+    stop_services() waits for the poller and the final MQTT publish, and
+    start_services() rescans every platform; on the Tk thread that froze the
+    whole UI for seconds. Neither touches Tk, so they are safe off it.
+    """
+    def worker():
+        with RESTART_LOCK:
+            try:
+                stop_services()
+                start_services()
+            except Exception as e:
+                debug_log(f"Restart failed: {e}")
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # --- GUI & SYSTEM TRAY ---
