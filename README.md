@@ -80,12 +80,14 @@ Gaming Status Agent uses whichever source knows the game's real name, in this or
 5. **Xbox / Microsoft Store** *(off by default)* — reads installed Store
    packages from the app registry, keeps the ones carrying a game manifest, and
    matches any process running from inside a package folder.
-6. **Riot Games, HoYoverse and Minecraft** *(off by default)* — matched by the
+6. **Riot Games, HoYoverse, Minecraft and Roblox** *(off by default)* — matched by the
    game's own executable, so lobbies and launchers never count as playing.
    League of Legends and Teamfight Tactics share one executable; the game's
    local Live Client Data API tells them apart once a match has loaded.
    Minecraft Java is recognised by a `javaw.exe` window titled "Minecraft",
    which covers the official launcher, CurseForge, Prism and MultiMC alike.
+   Roblox is the player client, however it was started (Bloxstrap included);
+   it reports as "Roblox" rather than the experience being played.
 7. **Window ancestry** — for everything else, finds a visible window whose
    process descends from a known launcher and uses its title.
 
@@ -119,7 +121,7 @@ While Steam is off, anything launched through Steam is ignored, Playnite-launche
 Steam games included. A **Custom Games** rule still overrides that, because it's
 deliberate configuration rather than automatic detection.
 
-### Riot Games, HoYoverse and Minecraft are opt-in
+### Riot Games, HoYoverse, Minecraft and Roblox are opt-in
 
 These are matched by fixed executable names rather than a launcher's own
 records, so they stay off until you switch them on under **Platforms**. Once
@@ -162,6 +164,7 @@ here because they're handy to set when deploying the same config to several PCs:
 | `ENABLE_RIOT` | `false` |
 | `ENABLE_HOYOVERSE` | `false` |
 | `ENABLE_MINECRAFT` | `false` |
+| `ENABLE_ROBLOX` | `false` |
 
 A switched-off platform is skipped completely — its registry and manifest scans
 never run at startup, and the poller doesn't check it each tick. Turning off

@@ -170,6 +170,7 @@ DEFAULT_CONFIG = {
     "XBOX_PROFILE_NAME": "",
     "RIOT_PROFILE_NAME": "",
     "HOYOVERSE_PROFILE_NAME": "",
+    "ROBLOX_PROFILE_NAME": "",
     # Per-platform switches, all editable from the tray under "Platforms".
     # Steam and Xbox default to off: each has an official Home Assistant
     # integration of its own, and turning them on here without asking would
@@ -192,6 +193,7 @@ DEFAULT_CONFIG = {
     "ENABLE_RIOT": False,
     "ENABLE_HOYOVERSE": False,
     "ENABLE_MINECRAFT": False,
+    "ENABLE_ROBLOX": False,
     "MQTT_BROKER": "192.168.1.xxx",
     "MQTT_PORT": 1883,
     # Blank so a broker that allows anonymous access connects on first run.
@@ -221,7 +223,8 @@ LAUNCHER_PROFILE_KEYS = {
     "Steam": "STEAM_PROFILE_NAME",
     "Xbox": "XBOX_PROFILE_NAME",
     "Riot Games": "RIOT_PROFILE_NAME",
-    "HoYoverse": "HOYOVERSE_PROFILE_NAME"
+    "HoYoverse": "HOYOVERSE_PROFILE_NAME",
+    "Roblox": "ROBLOX_PROFILE_NAME"
 }
 
 # Launcher label -> the config key that switches it on. Every detector consults
@@ -239,6 +242,7 @@ PLATFORM_ENABLE_KEYS = {
     "Riot Games": "ENABLE_RIOT",
     "HoYoverse": "ENABLE_HOYOVERSE",
     "Minecraft": "ENABLE_MINECRAFT",
+    "Roblox": "ENABLE_ROBLOX",
     "Custom": "ENABLE_CUSTOM"
 }
 
@@ -246,8 +250,8 @@ PLATFORM_ENABLE_KEYS = {
 # log: alphabetical, so a platform is easy to find, with Custom last as the
 # catch-all. Detection priority is set separately, in resolve_named_sources().
 PLATFORM_ORDER = ("Amazon Games", "Battle.net", "EA", "Epic", "GOG",
-                  "HoYoverse", "Minecraft", "Playnite", "Riot Games", "Steam",
-                  "Ubisoft", "Xbox", "Custom")
+                  "HoYoverse", "Minecraft", "Playnite", "Riot Games", "Roblox",
+                  "Steam", "Ubisoft", "Xbox", "Custom")
 
 
 def platform_enabled(launcher_name):
@@ -339,7 +343,10 @@ IGNORE_EXES = {
     "riotclientservices.exe", "riotclientux.exe", "riotclientuxrender.exe",
     "leagueclient.exe", "leagueclientux.exe", "leagueclientuxrender.exe",
     "hyp.exe", "hoyoplay.exe", "minecraftlauncher.exe", "minecraft.exe",
-    "curseforge.exe"
+    "curseforge.exe",
+    "robloxplayerlauncher.exe", "robloxplayerinstaller.exe",
+    "robloxstudiobeta.exe", "robloxstudiolauncherbeta.exe",
+    "bloxstrap.exe", "fishstrap.exe"
 }
 
 # Executable names too generic to identify a game on their own. A GOG title
@@ -380,7 +387,8 @@ LAUNCHER_FAMILY_TOKENS = (
     "battle.net", "blizzard", "steam", "ubisoft", "uplay", "upc.exe",
     "eadesktop", "eabackgroundservice", "origin",
     "xbox", "gamingservices", "gamelaunchhelper", "gamebar",
-    "riot", "league", "hyp.exe", "hoyoplay", "minecraft", "curseforge"
+    "riot", "league", "hyp.exe", "hoyoplay", "minecraft", "curseforge",
+    "roblox", "bloxstrap", "fishstrap"
 )
 
 # Anything descended from these is never auto-detected while its platform is
@@ -1748,7 +1756,8 @@ def snapshot_processes():
 # or executable. Used to decide whether a poll needs to enumerate processes at
 # all, so a machine with everything switched off does no work per tick.
 PROCESS_BACKED_PLATFORMS = ("Epic", "Steam", "GOG", "Battle.net", "Xbox",
-                            "Riot Games", "HoYoverse", "Minecraft", "Custom")
+                            "Riot Games", "HoYoverse", "Minecraft", "Roblox",
+                            "Custom")
 
 
 def poll_work_needed():
@@ -1781,6 +1790,9 @@ KNOWN_GAME_EXES = {
     "lor.exe": ("Legends of Runeterra", "Riot Games"),
     "league of legends.exe": ("League of Legends", "Riot Games"),
     "minecraft.windows.exe": ("Minecraft", "Minecraft"),
+    # The in-game client, however it was started: website, Roblox app,
+    # Bloxstrap or Fishstrap. Studio is editing, not playing, and is ignored.
+    "robloxplayerbeta.exe": ("Roblox", "Roblox"),
 }
 
 MINECRAFT_JAVA_EXES = {"javaw.exe", "java.exe"}
@@ -1870,6 +1882,7 @@ def resolve_named_sources(processes, epic_title, running_exes=frozenset(),
         ("HoYoverse", lambda: find_known_exe_game(running_exes, "HoYoverse")),
         ("Minecraft", lambda: find_known_exe_game(running_exes, "Minecraft")
             or find_minecraft_java(windows, snapshot or {})),
+        ("Roblox", lambda: find_known_exe_game(running_exes, "Roblox")),
     ]
 
     resolved = []
@@ -2227,7 +2240,8 @@ def build_diagnostic_report():
         "Xbox": "package folder",
         "Riot Games": "game executable",
         "HoYoverse": "game executable",
-        "Minecraft": "exe / javaw window"
+        "Minecraft": "exe / javaw window",
+        "Roblox": "game executable"
     }
 
     section("DETECTION SOURCES, IN PRIORITY ORDER")
@@ -2688,7 +2702,7 @@ def show_platforms_ui():
     if _focus_existing("platforms"):
         return
 
-    plat_win = _make_settings_window("platforms", "Gaming Status Agent - Platforms", "430x440")
+    plat_win = _make_settings_window("platforms", "Gaming Status Agent - Platforms", "430x465")
 
     tk.Label(plat_win, text="Which platforms should be tracked?",
              font=("", 9, "bold")).grid(row=0, column=0, columnspan=2,
