@@ -23,7 +23,7 @@ import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.2.0"
+GSA_VERSION = "1.2.1"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -171,6 +171,7 @@ DEFAULT_CONFIG = {
     "RIOT_PROFILE_NAME": "",
     "HOYOVERSE_PROFILE_NAME": "",
     "ROBLOX_PROFILE_NAME": "",
+    "ROCKSTAR_PROFILE_NAME": "",
     # Per-platform switches, all editable from the tray under "Platforms".
     # Steam and Xbox default to off: each has an official Home Assistant
     # integration of its own, and turning them on here without asking would
@@ -194,6 +195,7 @@ DEFAULT_CONFIG = {
     "ENABLE_HOYOVERSE": False,
     "ENABLE_MINECRAFT": False,
     "ENABLE_ROBLOX": False,
+    "ENABLE_ROCKSTAR": False,
     "MQTT_BROKER": "192.168.1.xxx",
     "MQTT_PORT": 1883,
     # Blank so a broker that allows anonymous access connects on first run.
@@ -224,7 +226,8 @@ LAUNCHER_PROFILE_KEYS = {
     "Xbox": "XBOX_PROFILE_NAME",
     "Riot Games": "RIOT_PROFILE_NAME",
     "HoYoverse": "HOYOVERSE_PROFILE_NAME",
-    "Roblox": "ROBLOX_PROFILE_NAME"
+    "Roblox": "ROBLOX_PROFILE_NAME",
+    "Rockstar Games": "ROCKSTAR_PROFILE_NAME"
 }
 
 # Launcher label -> the config key that switches it on. Every detector consults
@@ -243,6 +246,7 @@ PLATFORM_ENABLE_KEYS = {
     "HoYoverse": "ENABLE_HOYOVERSE",
     "Minecraft": "ENABLE_MINECRAFT",
     "Roblox": "ENABLE_ROBLOX",
+    "Rockstar Games": "ENABLE_ROCKSTAR",
     "Custom": "ENABLE_CUSTOM"
 }
 
@@ -251,7 +255,7 @@ PLATFORM_ENABLE_KEYS = {
 # catch-all. Detection priority is set separately, in resolve_named_sources().
 PLATFORM_ORDER = ("Amazon Games", "Battle.net", "EA", "Epic", "GOG",
                   "HoYoverse", "Minecraft", "Playnite", "Riot Games", "Roblox",
-                  "Steam", "Ubisoft", "Xbox", "Custom")
+                  "Rockstar Games", "Steam", "Ubisoft", "Xbox", "Custom")
 
 
 def platform_enabled(launcher_name):
@@ -346,7 +350,12 @@ IGNORE_EXES = {
     "curseforge.exe",
     "robloxplayerlauncher.exe", "robloxplayerinstaller.exe",
     "robloxstudiobeta.exe", "robloxstudiolauncherbeta.exe",
-    "bloxstrap.exe", "fishstrap.exe"
+    "bloxstrap.exe", "fishstrap.exe",
+    # Rockstar's launcher services and the per-game stubs that hand off to the
+    # real executable. The launcher's own UI is a generic "Launcher.exe", which
+    # is deliberately not listed here; Rockstar detection never relies on it.
+    "rockstarservice.exe", "socialclubhelper.exe", "rockstarerrorhandler.exe",
+    "rockstarsteamhelper.exe", "playgtav.exe", "playrdr2.exe", "playgtaiv.exe"
 }
 
 # Executable names too generic to identify a game on their own. A GOG title
@@ -388,7 +397,8 @@ LAUNCHER_FAMILY_TOKENS = (
     "eadesktop", "eabackgroundservice", "origin",
     "xbox", "gamingservices", "gamelaunchhelper", "gamebar",
     "riot", "league", "hyp.exe", "hoyoplay", "minecraft", "curseforge",
-    "roblox", "bloxstrap", "fishstrap"
+    "roblox", "bloxstrap", "fishstrap",
+    "rockstar", "socialclub"
 )
 
 # Anything descended from these is never auto-detected while its platform is
@@ -1814,7 +1824,7 @@ def snapshot_processes():
 # all, so a machine with everything switched off does no work per tick.
 PROCESS_BACKED_PLATFORMS = ("Epic", "Steam", "GOG", "Battle.net", "Xbox",
                             "Riot Games", "HoYoverse", "Minecraft", "Roblox",
-                            "Custom")
+                            "Rockstar Games", "Custom")
 
 
 def poll_work_needed():
@@ -1850,6 +1860,20 @@ KNOWN_GAME_EXES = {
     # The in-game client, however it was started: website, Roblox app,
     # Bloxstrap or Fishstrap. Studio is editing, not playing, and is ignored.
     "robloxplayerbeta.exe": ("Roblox", "Roblox"),
+    # Rockstar titles require the Rockstar Games Launcher whichever store sold
+    # them. Steam and Epic copies are claimed by those sources first, so this
+    # names the ones bought from Rockstar directly.
+    "gta5.exe": ("Grand Theft Auto V", "Rockstar Games"),
+    "gta5_enhanced.exe": ("Grand Theft Auto V", "Rockstar Games"),
+    "rdr2.exe": ("Red Dead Redemption 2", "Rockstar Games"),
+    "rdr.exe": ("Red Dead Redemption", "Rockstar Games"),
+    "gtaiv.exe": ("Grand Theft Auto IV", "Rockstar Games"),
+    "sanandreas.exe": ("Grand Theft Auto: San Andreas - The Definitive Edition", "Rockstar Games"),
+    "vicecity.exe": ("Grand Theft Auto: Vice City - The Definitive Edition", "Rockstar Games"),
+    "libertycity.exe": ("Grand Theft Auto III - The Definitive Edition", "Rockstar Games"),
+    "lanoire.exe": ("L.A. Noire", "Rockstar Games"),
+    "maxpayne3.exe": ("Max Payne 3", "Rockstar Games"),
+    "bully.exe": ("Bully: Scholarship Edition", "Rockstar Games"),
 }
 
 MINECRAFT_JAVA_EXES = {"javaw.exe", "java.exe"}
@@ -1946,6 +1970,7 @@ def resolve_named_sources(processes, epic_title, running_exes=frozenset(),
         ("Minecraft", lambda: find_known_exe_game(running_exes, "Minecraft")
             or find_minecraft_java(windows, snapshot or {})),
         ("Roblox", lambda: find_known_exe_game(running_exes, "Roblox")),
+        ("Rockstar Games", lambda: find_known_exe_game(running_exes, "Rockstar Games")),
     ]
 
     resolved = []
@@ -2306,7 +2331,8 @@ def build_diagnostic_report():
         "Riot Games": "game executable",
         "HoYoverse": "game executable",
         "Minecraft": "exe / javaw window",
-        "Roblox": "game executable"
+        "Roblox": "game executable",
+        "Rockstar Games": "game executable"
     }
 
     section("DETECTION SOURCES, IN PRIORITY ORDER")
@@ -2819,7 +2845,7 @@ def show_platforms_ui():
     if _focus_existing("platforms"):
         return
 
-    plat_win = _make_settings_window("platforms", "Gaming Status Agent - Platforms", "430x465")
+    plat_win = _make_settings_window("platforms", "Gaming Status Agent - Platforms", "430x490")
 
     tk.Label(plat_win, text="Which platforms should be tracked?",
              font=("", 9, "bold")).grid(row=0, column=0, columnspan=2,
@@ -3201,6 +3227,10 @@ def detect_installed_platforms():
                    for p in packages()),
         "Roblox": lambda: _any_path_exists(
             (local, "Roblox", "Versions"), (local, "Bloxstrap"), (local, "Fishstrap")),
+        "Rockstar Games": lambda: _any_path_exists(
+            (progfiles, "Rockstar Games", "Launcher"))
+            or _reg_key_exists(winreg.HKEY_LOCAL_MACHINE,
+                               r"SOFTWARE\WOW6432Node\Rockstar Games\Launcher"),
         "Steam": lambda: _reg_key_exists(winreg.HKEY_CURRENT_USER, STEAM_REG_PATH),
         "Xbox": lambda: any(p.startswith("microsoft.gamingapp_") for p in packages()),
     }
@@ -3230,7 +3260,7 @@ def run_setup_wizard():
 
     win = tk.Toplevel(ROOT)
     win.title("Gaming Status Agent Setup")
-    win.geometry("480x590")
+    win.geometry("480x615")
     win.resizable(False, False)
     win.attributes('-topmost', True)
 

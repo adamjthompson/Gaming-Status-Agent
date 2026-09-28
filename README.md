@@ -1,8 +1,22 @@
 # Gaming Status Agent
 
 A Windows system-tray app that reports what you're playing to Home Assistant
-over MQTT. It detects games from Epic, Ubisoft, GOG, Battle.net, EA,
-Amazon Games, and Playnite (including emulated titles launched through Playnite) and publishes a single sensor with the game name, the launcher, and when you started playing.
+over MQTT. It detects games from the following launchers and publishes a single sensor with the game name, the launcher, and when you started playing:
+
+- Amazon Games
+- Battle.net
+- EA
+- Epic
+- GOG
+- HoYoverse
+- Minecraft
+- Playnite (including emulated titles launched through Playnite)
+- Riot Games
+- Roblox
+- Rockstar Games
+- Steam
+- Ubisoft
+- Xbox
 
 Home Assistant discovers the sensor automatically. No YAML required.
 
@@ -90,7 +104,7 @@ Gaming Status Agent uses whichever source knows the game's real name, in this or
 5. **Xbox / Microsoft Store** *(off by default)* — reads installed Store
    packages from the app registry, keeps the ones carrying a game manifest, and
    matches any process running from inside a package folder.
-6. **Riot Games, HoYoverse, Minecraft and Roblox** *(off by default)* — matched by the
+6. **Riot Games, HoYoverse, Minecraft, Roblox and Rockstar Games** *(off by default)* — matched by the
    game's own executable, so lobbies and launchers never count as playing.
    League of Legends and Teamfight Tactics share one executable; the game's
    local Live Client Data API tells them apart once a match has loaded.
@@ -98,6 +112,8 @@ Gaming Status Agent uses whichever source knows the game's real name, in this or
    which covers the official launcher, CurseForge, Prism and MultiMC alike.
    Roblox is the player client, however it was started (Bloxstrap included);
    it reports as "Roblox" rather than the experience being played.
+   Rockstar Games covers titles bought from Rockstar directly; Steam and Epic
+   copies still report under those stores.
 7. **Window ancestry** — for everything else, finds a visible window whose
    process descends from a known launcher and uses its title.
 
@@ -131,7 +147,7 @@ While Steam is off, anything launched through Steam is ignored, Playnite-launche
 Steam games included. A **Custom Games** rule still overrides that, because it's
 deliberate configuration rather than automatic detection.
 
-### Riot Games, HoYoverse, Minecraft and Roblox are opt-in
+### Riot Games, HoYoverse, Minecraft, Roblox and Rockstar Games are opt-in
 
 These are matched by fixed executable names rather than a launcher's own
 records, so they stay off until you switch them on under **Platforms**. Once
@@ -175,6 +191,7 @@ here because they're handy to set when deploying the same config to several PCs:
 | `ENABLE_HOYOVERSE` | `false` |
 | `ENABLE_MINECRAFT` | `false` |
 | `ENABLE_ROBLOX` | `false` |
+| `ENABLE_ROCKSTAR` | `false` |
 
 A switched-off platform is skipped completely — its registry and manifest scans
 never run at startup, and the poller doesn't check it each tick. Turning off
