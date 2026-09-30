@@ -23,7 +23,7 @@ import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.2.1"
+GSA_VERSION = "1.2.2"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -345,6 +345,9 @@ IGNORE_EXES = {
     # Riot, HoYoPlay and Minecraft launchers and lobbies. Only the games
     # themselves count as playing, so these must never be published.
     "riotclientservices.exe", "riotclientux.exe", "riotclientuxrender.exe",
+    # Current Riot Client builds, including the screen that picks between
+    # League of Legends and Teamfight Tactics.
+    "riot client.exe", "riotclientcrashhandler.exe",
     "leagueclient.exe", "leagueclientux.exe", "leagueclientuxrender.exe",
     "hyp.exe", "hoyoplay.exe", "minecraftlauncher.exe", "minecraft.exe",
     "curseforge.exe",
