@@ -139,6 +139,10 @@ EPIC_STARTUP_GRACE = 180
 # Consecutive polls a changed state must hold before the poller publishes it.
 SETTLE_TICKS = 2
 
+# Published as the sensor's Machine attribute, so the Gaming Status integration
+# can show which computer a game is running on when one profile has several.
+MACHINE_NAME = os.environ.get("COMPUTERNAME") or "Windows PC"
+
 GENERIC_ACCOUNT_NAMES = {"administrator", "admin", "user", "default", "guest", "owner"}
 
 
@@ -1484,7 +1488,9 @@ def publish_global_state(status, game_title, launcher_name, wait=False):
             "Game Title": game_title,
             "Launcher": GLOBAL_STATE["launcher"],
             "Start Time": start_time,
-            "End Time": end_time
+            "End Time": end_time,
+            "Machine": MACHINE_NAME,
+            "OS": "Windows"
         }
 
     debug_log(f"Attempting to publish via MQTT: {game_title} on {launcher_name}")
@@ -1497,7 +1503,9 @@ def _offline_payload():
         "Game Title": "Offline",
         "Launcher": "None",
         "Start Time": "None",
-        "End Time": "None"
+        "End Time": "None",
+        "Machine": MACHINE_NAME,
+        "OS": "Windows"
     }
 
 
@@ -1594,7 +1602,9 @@ def republish_current_state():
         "Game Title": state["game"],
         "Launcher": state["launcher"],
         "Start Time": state["start_time"],
-        "End Time": "None"
+        "End Time": "None",
+        "Machine": MACHINE_NAME,
+        "OS": "Windows"
     }
     _publish_payload(payload)
 

@@ -20,11 +20,14 @@ over MQTT. It detects games from the following launchers and publishes a single 
 
 Home Assistant discovers the sensor automatically. No YAML required.
 
+A Linux version covers Steam (native and Proton), Heroic (Epic, GOG and Amazon)
+and Lutris. See [Linux](#linux).
+
 ---
 
 ## Requirements
 
-- Windows
+- Windows, or Linux for `gsa_linux.py` (see [Linux](#linux))
 - A Home Assistant instance with the [MQTT integration](https://www.home-assistant.io/integrations/mqtt/)
   set up and a broker it can reach (Mosquitto is the usual choice)
 - Python 3.8+ if running from source
@@ -79,6 +82,8 @@ title. Attributes:
 | `Profile Name` | Your gamertag for that store, or the device name if unset |
 | `Start Time` | `2026-09-21 14:09:40` |
 | `End Time` | Set when a session ends |
+| `Machine` | The computer's name, e.g. `GAMING-PC` |
+| `OS` | `Windows` or `Linux` |
 
 If the PC loses power or drops off the network, the broker publishes `Offline`
 on Gaming Status Agent's behalf via its Last Will, so the sensor never sticks on a game you
@@ -286,6 +291,72 @@ gsa_debug.log        what you played and when
 gsa_diagnostics.txt  broker address, window titles, process list
 gsa_ubi_ids.json     cached game-name catalog
 ```
+
+## Linux
+
+`gsa_linux.py` is a separate agent for Linux. It publishes the same sensor in
+the same format, so Home Assistant and the Gaming Status integration treat it
+exactly like the Windows agent.
+
+### What it detects
+
+| Platform | How |
+|---|---|
+| **Steam**, native and Proton *(off by default, as on Windows)* | Steam starts every game through its `reaper` wrapper with `AppId=<id>`, Proton games included. The title comes from the `appmanifest_*.acf` files in every Steam library. Native, Flatpak and Snap installs of Steam are all found. |
+| **Epic, GOG, Amazon Games** via [Heroic](https://heroicgameslauncher.com) | There are no official Linux clients for these stores, so Heroic is the launcher used. Heroic's installed-games lists give each game's folder; a running process inside that folder is that game, reported under its store (Epic, GOG or Amazon Games) with that store's gamertag. Native and Flatpak installs of Heroic are both found. |
+| **Lutris** | Reads the game name Lutris gives the game's process. A Steam game started from Lutris still reports as Steam. |
+| **Custom** | Rules by process name (use `game.exe` for a Wine or Proton game) or by window title. Window-title rules need an X11 session and `wmctrl`. Wayland doesn't allow listing other apps' windows, so use process-name rules there. |
+
+### Install
+
+```
+sudo apt install python3-tk gir1.2-ayatanaappindicator3-0.1   # Debian/Ubuntu; tray icon support
+pip install -r requirements-linux.txt
+python3 gsa_linux.py
+```
+
+On first run the agent writes a default config, turns on **Start at login**, and
+opens the **MQTT Settings** and **Platforms** windows. Everything is editable
+later from the tray menu, which has the same items as the Windows agent.
+
+Files live in `~/.config/gaming-status-agent/` (`gsa_config.json`,
+`gsa_debug.log`). If the `keyring` package and a desktop keyring are available,
+the MQTT password is stored there rather than in the config file. Otherwise it
+is kept in the config file, which only your user can read.
+
+### Running without a tray icon
+
+On a desktop without a system tray, or to run as a service:
+
+```
+python3 gsa_linux.py --headless
+```
+
+To start it at login with systemd, copy this repository to
+`~/gaming-status-agent/`, then:
+
+```
+cp linux/gaming-status-agent.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now gaming-status-agent
+```
+
+In headless mode, edit `~/.config/gaming-status-agent/gsa_config.json` by hand
+and restart the service to apply the changes.
+
+### Diagnostics
+
+`python3 gsa_linux.py --diagnose` prints what the agent finds (Steam libraries,
+Heroic installs, running launchers) and what it would publish right now. The
+tray's **Run Diagnostics** shows the same report.
+
+### More than one computer
+
+Give each computer its own device name. Each one then gets its own sensor
+(`sensor.gsa_<device name>`), and the `Machine` and `OS` attributes show which
+computer a game is running on. Don't give two computers the same device name:
+they would share one sensor, and the idle computer would keep overwriting the
+one you're playing on.
 
 ## Building
 

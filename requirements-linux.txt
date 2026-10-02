@@ -1,0 +1,10 @@
+# Gaming Status Agent for Linux (gsa_linux.py).
+# Tkinter comes from your distribution (python3-tk on Debian/Ubuntu, tk on Arch/Fedora).
+# The tray icon needs AppIndicator or a system tray: see README.
+
+paho-mqtt>=2.0,<3.0
+psutil>=5.9,<8.0
+pystray>=0.19,<1.0
+Pillow>=10.0,<12.0
+# Optional: stores the MQTT password in the desktop keyring instead of the config file.
+keyring>=24.0
