@@ -33,7 +33,7 @@ from datetime import datetime
 import paho.mqtt.client as mqtt
 import psutil
 
-GSA_VERSION = "1.0.2"
+GSA_VERSION = "1.1.0"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -102,7 +102,7 @@ IGNORE_NAMES = {
 # Process name -> the label it launches for. Used only for diagnostics: Heroic
 # games are matched by install folder and Lutris by its own variables.
 LAUNCHER_PROCESSES = {"steam": "Steam", "heroic": "Heroic", "lutris": "Lutris",
-                      "pcsx2-qt": "PCSX2", "pcsx2": "PCSX2"}
+                      "pcsx2-qt": "PCSX2", "pcsx2": "PCSX2", "rpcs3": "RPCS3"}
 
 WINE_DRIVE_RE = re.compile(r'^[zZ]:[\\/]')
 
@@ -128,6 +128,8 @@ DEFAULT_CONFIG = {
     "ENABLE_LUTRIS": True,
     # Off until asked for: it only works once PINE is switched on in PCSX2.
     "ENABLE_PCSX2": False,
+    # Off until asked for: it only works once RPCS3's IPC server is switched on.
+    "ENABLE_RPCS3": False,
     "ENABLE_CUSTOM": False,
     "MQTT_BROKER": "192.168.1.xxx",
     "MQTT_PORT": 1883,
@@ -152,10 +154,12 @@ PLATFORM_ENABLE_KEYS = {
     "Amazon Games": "ENABLE_AMAZON",
     "Lutris": "ENABLE_LUTRIS",
     "PCSX2": "ENABLE_PCSX2",
+    "RPCS3": "ENABLE_RPCS3",
     "Custom": "ENABLE_CUSTOM"
 }
 
-PLATFORM_ORDER = ("Amazon Games", "Epic", "GOG", "Lutris", "PCSX2", "Steam", "Custom")
+PLATFORM_ORDER = ("Amazon Games", "Epic", "GOG", "Lutris", "PCSX2", "RPCS3", "Steam",
+                  "Custom")
 
 PLATFORM_NOTES = {
     "Amazon Games": "via Heroic",
@@ -163,6 +167,7 @@ PLATFORM_NOTES = {
     "GOG": "via Heroic",
     "Steam": "native and Proton",
     "PCSX2": "needs PINE enabled in PCSX2",
+    "RPCS3": "experimental; needs IPC enabled in RPCS3",
 }
 
 # Filled in at startup and on every restart.
@@ -548,6 +553,45 @@ def get_heroic_games():
     return games
 
 
+# Heroic's files that list installed games and their titles, relative to its
+# config folder. A change to any of them means a game was installed, moved or
+# removed while the agent was running.
+HEROIC_LIST_FILES = (
+    ("legendaryConfig", "legendary", "installed.json"),
+    ("gog_store", "installed.json"),
+    ("store_cache", "gog_library.json"),
+    ("nile_config", "nile", "installed.json"),
+    ("store_cache", "nile_library.json"),
+)
+_HEROIC_SIGNATURE = [None]
+
+
+def heroic_signature():
+    """Modification times of Heroic's game lists, across every install
+    location, so a change (or Heroic being installed) is noticed cheaply."""
+    sig = []
+    for root in HEROIC_ROOTS:
+        for parts in HEROIC_LIST_FILES:
+            try:
+                sig.append(os.stat(os.path.join(root, *parts)).st_mtime_ns)
+            except OSError:
+                sig.append(None)
+    return tuple(sig)
+
+
+def refresh_heroic_games():
+    """Rebuild HEROIC_GAMES if Heroic's lists changed since the last check."""
+    global HEROIC_GAMES
+    sig = heroic_signature()
+    if sig == _HEROIC_SIGNATURE[0]:
+        return
+    first = _HEROIC_SIGNATURE[0] is None
+    _HEROIC_SIGNATURE[0] = sig
+    HEROIC_GAMES = get_heroic_games()
+    if not first:
+        debug_log("Heroic's game lists changed; installed games reloaded.")
+
+
 def process_paths(info):
     """Every filesystem path a process points at: its exe and any absolute
     command-line argument, with Wine Z: paths converted. Under Wine or Proton
@@ -564,6 +608,7 @@ def process_paths(info):
 
 def find_heroic_game(snapshot):
     """(title, label) of a running game from a Heroic install folder."""
+    refresh_heroic_games()
     if not HEROIC_GAMES:
         return None
     for info in snapshot.values():
@@ -612,41 +657,22 @@ def find_lutris_game(snapshot):
     return None
 
 
-# --- PCSX2 (PINE) ---
-# PINE is PCSX2's IPC protocol. Each message is a little-endian u32 total size
-# followed by an opcode; each reply is the size, a result byte (0 = OK) and the
-# answer. PCSX2 must have PINE switched on (Settings > Advanced > PINE) and be
-# restarted once for the socket to appear.
+# --- EMULATORS (PINE) ---
+# PINE is the IPC protocol PCSX2 defines and RPCS3 also speaks. Each message is
+# a little-endian u32 total size followed by an opcode; each reply is the size,
+# a result byte (0 = OK) and the answer. On Linux each emulator listens on a
+# Unix socket in $XDG_RUNTIME_DIR, or inside its Flatpak's runtime folder. The
+# server is off by default in both emulators and needs a restart once enabled.
+PINE_EMULATORS = {
+    "PCSX2": {"procs": ("pcsx2",), "socket": "pcsx2.sock", "flatpak": "net.pcsx2.PCSX2",
+              "setup": "Is PINE switched on in PCSX2's Advanced settings?"},
+    "RPCS3": {"procs": ("rpcs3",), "socket": "rpcs3.sock", "flatpak": "net.rpcs3.RPCS3",
+              "setup": "Is the IPC server switched on in RPCS3's Advanced settings?"},
+}
 PINE_MSG_TITLE = 0x0B
 PINE_MSG_STATUS = 0x0F
 PINE_STATUS_SHUTDOWN = 2
 PINE_TIMEOUT = 0.5
-
-
-def pcsx2_socket_paths():
-    """Native and Flatpak socket locations. The default slot is pcsx2.sock;
-    any other slot number is appended as pcsx2.sock.<slot>."""
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-    dirs = [runtime,
-            os.path.join(runtime, ".flatpak", "net.pcsx2.PCSX2", "xdg-run"),
-            os.path.join(runtime, "app", "net.pcsx2.PCSX2")]
-    paths = []
-    for d in dirs:
-        paths.extend(glob.glob(os.path.join(d, "pcsx2.sock")))
-        paths.extend(glob.glob(os.path.join(d, "pcsx2.sock.*")))
-    return paths
-
-
-def _pine_request(sock, opcode):
-    sock.sendall(struct.pack("<IB", 5, opcode))
-    header = _recv_exact(sock, 4)
-    size = struct.unpack("<I", header)[0]
-    if size < 5 or size > 64 * 1024:
-        raise ValueError(f"bad PINE reply size {size}")
-    body = _recv_exact(sock, size - 4)
-    if body[0] != 0:
-        raise ValueError("PINE request failed")
-    return body[1:]
 
 
 def _recv_exact(sock, n):
@@ -659,49 +685,81 @@ def _recv_exact(sock, n):
     return data
 
 
-def pcsx2_query(path):
+def _pine_request(sock, opcode):
+    sock.sendall(struct.pack("<IB", 5, opcode))
+    size = struct.unpack("<I", _recv_exact(sock, 4))[0]
+    if size < 5 or size > 64 * 1024:
+        raise ValueError(f"bad PINE reply size {size}")
+    body = _recv_exact(sock, size - 4)
+    if body[0] != 0:
+        raise ValueError("PINE request failed")
+    return body[1:]
+
+
+def _pine_title(sock):
+    """Ask an open PINE connection for the running game's title, or None."""
+    sock.settimeout(PINE_TIMEOUT)
+    status = struct.unpack("<I", _pine_request(sock, PINE_MSG_STATUS)[:4])[0]
+    if status == PINE_STATUS_SHUTDOWN:
+        return None
+    reply = _pine_request(sock, PINE_MSG_TITLE)
+    length = struct.unpack("<I", reply[:4])[0]
+    title = reply[4:4 + length].split(b"\0", 1)[0].decode("utf-8", "replace").strip()
+    return title or None
+
+
+# The last error logged per emulator, so a persistent failure is logged once.
+_PINE_LAST_ERROR = {}
+
+
+def _log_pine_error(label, message):
+    if message and message != _PINE_LAST_ERROR.get(label):
+        debug_log(message)
+    _PINE_LAST_ERROR[label] = message
+
+
+def pine_socket_paths(label):
+    """Native and Flatpak socket locations. The default slot is <name>.sock;
+    any other slot number is appended as <name>.sock.<slot>."""
+    emu = PINE_EMULATORS[label]
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    dirs = [runtime,
+            os.path.join(runtime, ".flatpak", emu["flatpak"], "xdg-run"),
+            os.path.join(runtime, "app", emu["flatpak"])]
+    paths = []
+    for d in dirs:
+        paths.extend(glob.glob(os.path.join(d, emu["socket"])))
+        paths.extend(glob.glob(os.path.join(d, emu["socket"] + ".*")))
+    return paths
+
+
+def pine_query(path):
     """The running game's title from one PINE socket, or None."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(PINE_TIMEOUT)
         sock.connect(path)
-        status = struct.unpack("<I", _pine_request(sock, PINE_MSG_STATUS)[:4])[0]
-        if status == PINE_STATUS_SHUTDOWN:
-            return None
-        reply = _pine_request(sock, PINE_MSG_TITLE)
-        length = struct.unpack("<I", reply[:4])[0]
-        title = reply[4:4 + length].split(b"\0", 1)[0].decode("utf-8", "replace").strip()
-        return title or None
+        return _pine_title(sock)
 
 
-def find_pcsx2_game(snapshot):
-    # A stale socket is left behind after a crash, so only ask while PCSX2 runs.
-    if not any(info["name"].startswith("pcsx2") for info in snapshot.values()):
+def find_pine_game(label, snapshot):
+    emu = PINE_EMULATORS[label]
+    # A stale socket is left behind after a crash, so only ask while it runs.
+    if not any(info["name"].startswith(emu["procs"]) for info in snapshot.values()):
         return None
-    paths = pcsx2_socket_paths()
+    paths = pine_socket_paths(label)
     if not paths:
-        _log_pcsx2_error("PCSX2 is running but has no PINE socket. "
-                         "Is PINE switched on in PCSX2's Advanced settings?")
+        _log_pine_error(label, f"{label} is running but has no PINE socket. {emu['setup']}")
         return None
     for path in paths:
         try:
-            title = pcsx2_query(path)
+            title = pine_query(path)
         except (OSError, ValueError, struct.error) as e:
-            _log_pcsx2_error(f"PCSX2 PINE query on {path} failed: {e}")
+            _log_pine_error(label, f"{label} PINE query on {path} failed: {e}")
             continue
-        _log_pcsx2_error(None)
+        _log_pine_error(label, None)
         if title:
             return title
     return None
-
-
-_PCSX2_LAST_ERROR = [None]
-
-
-def _log_pcsx2_error(message):
-    """Log a PINE failure once, not on every poll while it persists."""
-    if message != _PCSX2_LAST_ERROR[0] and message:
-        debug_log(message)
-    _PCSX2_LAST_ERROR[0] = message
 
 
 # --- CUSTOM ---
@@ -809,7 +867,7 @@ def resolve_sources(snapshot):
 
     Steam leads: its AppId is exact, and a Steam game started from Lutris or
     Heroic is still a Steam game. Heroic's install-folder match is next, then
-    Lutris, then PCSX2, then Custom rules as the catch-all. The poller and
+    Lutris, then the emulators, then Custom rules as the catch-all. The poller and
     diagnostics both walk this list, so the report never disagrees with what
     is published.
     """
@@ -832,8 +890,9 @@ def resolve_sources(snapshot):
 
     if platform_enabled("Lutris"):
         resolved.append(("Lutris", run("Lutris", lambda: find_lutris_game(snapshot))))
-    if platform_enabled("PCSX2"):
-        resolved.append(("PCSX2", run("PCSX2", lambda: find_pcsx2_game(snapshot))))
+    for label in PINE_EMULATORS:
+        if platform_enabled(label):
+            resolved.append((label, run(label, lambda l=label: find_pine_game(l, snapshot))))
     if platform_enabled("Custom"):
         resolved.append(("Custom", run("Custom", lambda: find_custom_game(snapshot))))
     return resolved
@@ -895,12 +954,34 @@ def _publish_payload(payload, wait=False):
     if not client:
         return
     try:
+        # QoS 1: a retained QoS 0 state message is dropped outright if the
+        # link is down, which leaves Home Assistant showing a stale game.
         info = client.publish(get_state_topic(), json.dumps(payload), qos=1, retain=True)
-        if wait:
-            info.wait_for_publish(timeout=2)
-        debug_log("MQTT Publish Successful")
     except Exception as e:
-        debug_log(f"MQTT Publish Failed: {e}")
+        debug_log(f"MQTT publish failed: {e}")
+        return
+    # publish() only queues the message. A non-zero rc means it was not even
+    # handed to the network (usually no connection yet); _on_connect republishes
+    # the current state once connected. Delivery is logged by _on_publish.
+    if info.rc != mqtt.MQTT_ERR_SUCCESS:
+        debug_log(f"MQTT publish not sent yet ({mqtt.error_string(info.rc)}); "
+                  "the current state is re-sent on reconnect.")
+        return
+    if not wait:
+        debug_log(f"MQTT publish queued (message {info.mid}).")
+        return
+    try:
+        info.wait_for_publish(timeout=2)
+    except Exception as e:
+        debug_log(f"MQTT publish failed while waiting: {e}")
+        return
+    if not info.is_published():
+        debug_log("MQTT publish not confirmed by the broker within 2s.")
+
+
+def _on_publish(mqtt_client, userdata, mid, *args):
+    # paho 1.6 passes (mid); 2.x adds (reason_code, properties).
+    debug_log(f"MQTT publish delivered (message {mid}).")
 
 
 def republish_current_state():
@@ -1039,9 +1120,12 @@ def stop_services():
 
 
 def scan_installed_games():
-    global STEAM_BY_APPID, HEROIC_GAMES
+    global STEAM_BY_APPID
     STEAM_BY_APPID = get_steam_mapping() if platform_enabled("Steam") else {}
-    HEROIC_GAMES = get_heroic_games()
+    # Forget the last signature so a restart (e.g. a platform switched on)
+    # always rereads Heroic's lists.
+    _HEROIC_SIGNATURE[0] = None
+    refresh_heroic_games()
 
 
 def start_services():
@@ -1087,13 +1171,22 @@ def _connect_mqtt(stop_event):
     with CLIENT_LOCK:
         if stop_event.is_set():
             return
-        client = _build_mqtt_client()
-        _configure_and_connect(client)
+        new_client = _build_mqtt_client()
+        if _configure_and_connect(new_client):
+            client = new_client
+
+
+# Why MQTT is not connecting, for diagnostics. Empty when nothing is wrong.
+MQTT_SETUP_ERROR = ""
 
 
 def _configure_and_connect(client):
+    """Set up and start the client. False if it must not connect at all."""
+    global MQTT_SETUP_ERROR
+    MQTT_SETUP_ERROR = ""
     client.on_connect = _on_connect
     client.on_disconnect = _on_disconnect
+    client.on_publish = _on_publish
 
     user = CONFIG.get("MQTT_USER", "")
     password = CONFIG.get("MQTT_PASS", "")
@@ -1105,7 +1198,11 @@ def _configure_and_connect(client):
             client.tls_set(ca_certs=CONFIG.get("MQTT_CA_CERT", "").strip() or None)
             debug_log("MQTT TLS enabled.")
         except Exception as e:
-            debug_log(f"Failed to enable TLS, continuing without it: {e}")
+            # Connecting anyway would send the login unencrypted to a broker
+            # the user asked to reach over TLS.
+            MQTT_SETUP_ERROR = f"TLS setup failed, not connecting: {e}"
+            debug_log(f"MQTT {MQTT_SETUP_ERROR}. Fix the CA certificate or turn TLS off.")
+            return False
 
     # If this machine sleeps or crashes, the broker publishes Offline for us.
     try:
@@ -1120,6 +1217,7 @@ def _configure_and_connect(client):
         client.loop_start()
     except Exception as e:
         debug_log(f"MQTT setup failed (check IP/Port): {e}")
+    return True
 
 
 RESTART_LOCK = threading.Lock()
@@ -1144,6 +1242,7 @@ def build_diagnostic_report():
            f"Machine: {MACHINE_NAME}",
            f"Broker: {CONFIG.get('MQTT_BROKER')}:{CONFIG.get('MQTT_PORT')}"
            f"{' (TLS)' if CONFIG.get('MQTT_TLS') else ''}",
+           f"MQTT: {MQTT_SETUP_ERROR or ('connected' if client and client.is_connected() else 'not connected')}",
            f"Session: {os.environ.get('XDG_SESSION_TYPE') or 'unknown'}",
            ""]
 
@@ -1172,10 +1271,11 @@ def build_diagnostic_report():
 
     if CONFIG.get(KEYRING_PENDING):
         out.append(f"MQTT password: waiting for the keyring (retrying every {KEYRING_RETRY_SECONDS}s)")
-    if platform_enabled("PCSX2"):
-        sockets = pcsx2_socket_paths()
-        out.append("PCSX2 PINE sockets: " + (", ".join(sockets) if sockets else
-                   "none (enable PINE in PCSX2's Advanced settings, then restart PCSX2)"))
+    for label, emu in PINE_EMULATORS.items():
+        if platform_enabled(label):
+            sockets = pine_socket_paths(label)
+            out.append(f"{label} PINE sockets: " + (", ".join(sockets) if sockets else
+                       f"none. {emu['setup']} Restart {label} after switching it on."))
     if platform_enabled("Custom"):
         titles = get_window_titles()
         out.append("Window-title rules: " + ("available (wmctrl)" if titles is not None else

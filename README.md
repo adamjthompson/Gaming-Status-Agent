@@ -15,6 +15,7 @@ over MQTT. It detects games from the following launchers and publishes a single 
 - Riot Games
 - Roblox
 - Rockstar Games
+- RPCS3 (PlayStation 3 emulator, experimental)
 - Steam
 - Ubisoft
 - Xbox
@@ -25,6 +26,7 @@ A separate Linux version covers the following (see [Linux](#linux)):
 - Heroic (Epic, GOG and Amazon)
 - Lutris
 - PCSX2
+- RPCS3 (experimental)
 - Steam (native and Proton)
 
 ---
@@ -133,8 +135,9 @@ Gaming Status Agent uses whichever source knows the game's real name, in this or
    it reports as "Roblox" rather than the experience being played.
    Rockstar Games covers titles bought from Rockstar directly; Steam and Epic
    copies still report under those stores.
-7. **PCSX2** *(off by default)* — asks the running emulator for the game's
-   title over PINE, PCSX2's control port. See [PCSX2](#pcsx2) below.
+7. **PCSX2 and RPCS3** *(off by default)* — ask the running emulator for the
+   game's title over PINE, its control port. See
+   [Emulators](#emulators-pcsx2-and-rpcs3) below.
 8. **Window ancestry** — for everything else, finds a visible window whose
    process descends from a known launcher and uses its title.
 
@@ -174,21 +177,33 @@ These are matched by fixed executable names rather than a launcher's own
 records, so they stay off until you switch them on under **Platforms**. Once
 HoYoverse is on, a Custom Games rule for `genshinimpact.exe` is no longer needed.
 
-### PCSX2
+### Emulators (PCSX2 and RPCS3)
 
-PCSX2 reports the game you're playing over PINE, its built-in control
-interface. To use it:
+PCSX2 (PlayStation 2) and RPCS3 (PlayStation 3) can each report the game
+you're playing over PINE, a control interface built into the emulator. Both
+are off by default, because nothing works until it's turned on in the
+emulator too.
 
-1. In PCSX2, turn on PINE under *Settings → Advanced → PINE*, and leave the
-   slot at the default **28011**.
+**PCSX2**
+1. Turn on PINE under *Settings → Advanced → PINE*, and leave the slot at the
+   default **28011**.
 2. Restart PCSX2 once so PINE starts listening.
 3. In Gaming Status Agent, switch on **PCSX2** under **Platforms**.
 
-It stays off by default because nothing works until PINE is turned on in
-PCSX2. If you changed PCSX2's PINE slot, set `PCSX2_PINE_SLOT` in
-`gsa_config.json` to match. A PS2 game launched from Playnite also reports as
-**PCSX2** with its proper title, rather than as Playnite with the emulator's
-window title.
+**RPCS3** *(experimental)*
+1. Turn on the IPC server under *Configuration → Advanced* (the exact place can
+   vary between RPCS3 versions), and leave the port at the default **28012**.
+2. Restart RPCS3 once.
+3. In Gaming Status Agent, switch on **RPCS3** under **Platforms**.
+
+RPCS3 support is new and hasn't been tested on many setups. If it doesn't pick
+up your game, please report it with your Run Diagnostics output.
+
+If you changed the slot or port, set `PCSX2_PINE_SLOT` or `RPCS3_IPC_SLOT` in
+`gsa_config.json` to match (Windows only; on Linux the socket is found
+automatically). A game launched from Playnite also reports under the emulator
+with its proper title, rather than as Playnite with the emulator's window
+title.
 
 ### What Playnite does and doesn't cover
 
@@ -335,9 +350,10 @@ exactly like the Windows agent.
 | Platform | How |
 |---|---|
 | **Steam**, native and Proton *(off by default, as on Windows)* | Steam starts every game through its `reaper` wrapper with `AppId=<id>`, Proton games included. The title comes from the `appmanifest_*.acf` files in every Steam library. Native, Flatpak and Snap installs of Steam are all found. |
-| **Epic, GOG, Amazon Games** via [Heroic](https://heroicgameslauncher.com) | There are no official Linux clients for these stores, so Heroic is the launcher used. Heroic's installed-games lists give each game's folder; a running process inside that folder is that game, reported under its store (Epic, GOG or Amazon Games) with that store's gamertag. Native and Flatpak installs of Heroic are both found. |
+| **Epic, GOG, Amazon Games** via [Heroic](https://heroicgameslauncher.com) | There are no official Linux clients for these stores, so Heroic is the launcher used. Heroic's installed-games lists give each game's folder; a running process inside that folder is that game, reported under its store (Epic, GOG or Amazon Games) with that store's gamertag. Native and Flatpak installs of Heroic are both found, and games installed or moved while the agent is running are picked up automatically. |
 | **Lutris** | Reads the game name Lutris gives the game's process. A Steam game started from Lutris still reports as Steam. |
-| **PCSX2** | Asks the running emulator for the game's title over PINE, PCSX2's control socket. Native, AppImage and Flatpak builds all work. *Off by default.* PINE is also off in PCSX2 by default: turn it on under *Settings → Advanced → PINE*, restart PCSX2 once so the socket is created, then switch on **PCSX2** under **Platforms**. |
+| **PCSX2** | Asks the running emulator for the game's title over PINE, PCSX2's control socket. Native, AppImage and Flatpak builds all work. *Off by default.* See [Emulators](#emulators-pcsx2-and-rpcs3) for setup. |
+| **RPCS3** *(experimental)* | The same as PCSX2, over RPCS3's IPC server (`rpcs3.sock`). *Off by default.* See [Emulators](#emulators-pcsx2-and-rpcs3) for setup. |
 | **Custom** | Rules by process name (use `game.exe` for a Wine or Proton game) or by window title. Window-title rules need an X11 session and `wmctrl`. Wayland doesn't allow listing other apps' windows, so use process-name rules there. |
 
 ### Install
@@ -389,7 +405,7 @@ and restart the service to apply the changes.
 ### Diagnostics
 
 `python3 linux/gsa_linux.py --diagnose` prints what the agent finds (Steam libraries,
-Heroic installs, PCSX2 PINE sockets, running launchers) and what it would publish right now. The
+Heroic installs, emulator PINE sockets, running launchers) and what it would publish right now. The
 tray's **Run Diagnostics** shows the same report.
 
 ### More than one computer
@@ -499,7 +515,7 @@ A release then looks like:
 
 The **Release** workflow (`.github/workflows/release.yml`) then builds the exe on
 a Windows runner and attaches it to the release, along with a
-`gaming-status-agent-linux-2026.10.2.zip` of the Linux agent. Watch it under the
+`gaming-status-agent-linux-<version>.zip` of the Linux agent, named with the Linux agent's own version. Watch it under the
 repository's **Actions** tab; it takes a few minutes. A release created from
 the Releases page keeps the notes you wrote; one created by pushing a tag gets
 generated notes headed with both app versions. To rebuild an existing

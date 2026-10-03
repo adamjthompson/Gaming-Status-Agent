@@ -42,7 +42,14 @@ jobs:
         run: |
           $win = (Select-String -Path windows/gsa_tracker.py -Pattern '^GSA_VERSION = "(.+)"').Matches[0].Groups[1].Value
           $lin = (Select-String -Path linux/gsa_linux.py -Pattern '^GSA_VERSION = "(.+)"').Matches[0].Groups[1].Value
-          if (-not $win -or -not $lin) { Write-Error "Could not read GSA_VERSION"; exit 1 }
+          # Both versions end up in asset names, release notes and exe metadata,
+          # so a missing or malformed one stops the release rather than shipping it.
+          foreach ($v in @(@("windows/gsa_tracker.py", $win), @("linux/gsa_linux.py", $lin))) {
+            if ($v[1] -notmatch '^\d+\.\d+\.\d+$') {
+              Write-Error "GSA_VERSION in $($v[0]) must look like 1.2.3, found '$($v[1])'"
+              exit 1
+            }
+          }
           "WIN_VERSION=$win" >> $env:GITHUB_ENV
           "LINUX_VERSION=$lin" >> $env:GITHUB_ENV
           Write-Host "Release $env:TAG: Windows $win, Linux $lin"
@@ -67,11 +74,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force staging/gaming-status-agent | Out-Null
           Copy-Item -Recurse linux, assets, README.md staging/gaming-status-agent/
-          Compress-Archive -Path staging/gaming-status-agent -DestinationPath "gaming-status-agent-linux-$env:TAG.zip"
+          Compress-Archive -Path staging/gaming-status-agent -DestinationPath "gaming-status-agent-linux-$env:LINUX_VERSION.zip"
 
       - name: Publish release
         run: |
-          $files = @("windows/dist/Gaming Status Agent.exe", "gaming-status-agent-linux-$env:TAG.zip")
+          $files = @("windows/dist/Gaming Status Agent.exe", "gaming-status-agent-linux-$env:LINUX_VERSION.zip")
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
             # Created from the Releases page: add the builds, keep its notes.

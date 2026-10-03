@@ -25,7 +25,7 @@ import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.2.3"
+GSA_VERSION = "1.3.0"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -206,6 +206,9 @@ DEFAULT_CONFIG = {
     "ENABLE_PCSX2": False,
     # PCSX2's PINE slot, which on Windows is the TCP port it listens on.
     "PCSX2_PINE_SLOT": 28011,
+    # Off until asked for: it only works once RPCS3's IPC server is switched on.
+    "ENABLE_RPCS3": False,
+    "RPCS3_IPC_SLOT": 28012,
     "MQTT_BROKER": "192.168.1.xxx",
     "MQTT_PORT": 1883,
     # Blank so a broker that allows anonymous access connects on first run.
@@ -258,6 +261,7 @@ PLATFORM_ENABLE_KEYS = {
     "Roblox": "ENABLE_ROBLOX",
     "Rockstar Games": "ENABLE_ROCKSTAR",
     "PCSX2": "ENABLE_PCSX2",
+    "RPCS3": "ENABLE_RPCS3",
     "Custom": "ENABLE_CUSTOM"
 }
 
@@ -266,10 +270,12 @@ PLATFORM_ENABLE_KEYS = {
 # catch-all. Detection priority is set separately, in resolve_named_sources().
 PLATFORM_ORDER = ("Amazon Games", "Battle.net", "EA", "Epic", "GOG",
                   "HoYoverse", "Minecraft", "PCSX2", "Playnite", "Riot Games",
-                  "Roblox", "Rockstar Games", "Steam", "Ubisoft", "Xbox", "Custom")
+                  "Roblox", "Rockstar Games", "RPCS3", "Steam", "Ubisoft", "Xbox",
+                  "Custom")
 
 # Shown after a platform's name wherever platforms are listed.
-PLATFORM_NOTES = {"PCSX2": "needs PINE enabled in PCSX2"}
+PLATFORM_NOTES = {"PCSX2": "needs PINE enabled in PCSX2",
+                  "RPCS3": "experimental; needs IPC enabled in RPCS3"}
 
 
 def platform_enabled(launcher_name):
@@ -373,9 +379,9 @@ IGNORE_EXES = {
     # is deliberately not listed here; Rockstar detection never relies on it.
     "rockstarservice.exe", "socialclubhelper.exe", "rockstarerrorhandler.exe",
     "rockstarsteamhelper.exe", "playgtav.exe", "playrdr2.exe", "playgtaiv.exe"
-    # PCSX2 is deliberately not listed. Its PINE source outranks window
-    # ancestry, and when PINE is off its window title is still the only name
-    # a Playnite-launched PS2 game has.
+    # PCSX2 and RPCS3 are deliberately not listed. Their PINE source outranks
+    # window ancestry, and when PINE is off the emulator's window title is
+    # still the only name a Playnite-launched game has.
 }
 
 # Executable names too generic to identify a game on their own. A GOG title
@@ -1531,11 +1537,31 @@ def _publish_payload(payload, wait=False):
         # QoS 1: a retained QoS 0 state message is dropped outright if the
         # link is down, which leaves Home Assistant showing a stale game.
         info = client.publish(get_state_topic(), json.dumps(payload), qos=1, retain=True)
-        if wait:
-            info.wait_for_publish(timeout=2)
-        debug_log("MQTT Publish Successful")
     except Exception as e:
-        debug_log(f"MQTT Publish Failed: {e}")
+        debug_log(f"MQTT publish failed: {e}")
+        return
+    # publish() only queues the message. A non-zero rc means it was not even
+    # handed to the network (usually no connection yet); _on_connect republishes
+    # the current state once connected. Delivery is logged by _on_publish.
+    if info.rc != mqtt.MQTT_ERR_SUCCESS:
+        debug_log(f"MQTT publish not sent yet ({mqtt.error_string(info.rc)}); "
+                  "the current state is re-sent on reconnect.")
+        return
+    if not wait:
+        debug_log(f"MQTT publish queued (message {info.mid}).")
+        return
+    try:
+        info.wait_for_publish(timeout=2)
+    except Exception as e:
+        debug_log(f"MQTT publish failed while waiting: {e}")
+        return
+    if not info.is_published():
+        debug_log("MQTT publish not confirmed by the broker within 2s.")
+
+
+def _on_publish(mqtt_client, userdata, mid, *args):
+    # paho 1.6 passes (mid); 2.x adds (reason_code, properties).
+    debug_log(f"MQTT publish delivered (message {mid}).")
 
 
 def epic_active_title():
@@ -1852,7 +1878,7 @@ def snapshot_processes():
 # all, so a machine with everything switched off does no work per tick.
 PROCESS_BACKED_PLATFORMS = ("Epic", "Steam", "GOG", "Battle.net", "Xbox",
                             "Riot Games", "HoYoverse", "Minecraft", "Roblox",
-                            "Rockstar Games", "PCSX2", "Custom")
+                            "Rockstar Games", "PCSX2", "RPCS3", "Custom")
 
 
 def poll_work_needed():
@@ -1917,12 +1943,19 @@ LEAGUE_MODE_RETRY_SECONDS = 15
 _LEAGUE_MODE = {"title": None, "checked": 0.0, "failed": -1e9}
 
 
-# --- PCSX2 (PINE) ---
-# PINE is PCSX2's control protocol; on Windows it listens on 127.0.0.1 at the
-# slot number. Each message is a little-endian u32 total size and an opcode;
-# each reply is the size, a result byte (0 = OK) and the answer. PCSX2 must
-# have PINE switched on (Settings > Advanced > PINE) and be restarted once.
-PCSX2_EXES = {"pcsx2-qt.exe", "pcsx2.exe"}
+# --- EMULATORS (PINE) ---
+# PINE is the IPC protocol PCSX2 defines and RPCS3 also speaks. On Windows each
+# emulator listens on 127.0.0.1 at its slot number. Each message is a
+# little-endian u32 total size and an opcode; each reply is the size, a result
+# byte (0 = OK) and the answer. The server is off by default in both emulators
+# and needs a restart once enabled.
+PINE_EMULATORS = {
+    "PCSX2": {"exes": {"pcsx2-qt.exe", "pcsx2.exe"}, "slot_key": "PCSX2_PINE_SLOT",
+              "slot": 28011,
+              "setup": "Is PINE switched on in PCSX2's Advanced settings?"},
+    "RPCS3": {"exes": {"rpcs3.exe"}, "slot_key": "RPCS3_IPC_SLOT", "slot": 28012,
+              "setup": "Is the IPC server switched on in RPCS3's Advanced settings?"},
+}
 PINE_MSG_TITLE = 0x0B
 PINE_MSG_STATUS = 0x0F
 PINE_STATUS_SHUTDOWN = 2
@@ -1950,42 +1983,47 @@ def _pine_request(sock, opcode):
     return body[1:]
 
 
-def pcsx2_query(port):
-    """The running game's title from PCSX2's PINE port, or None."""
-    with socket.create_connection(("127.0.0.1", port), timeout=PINE_TIMEOUT) as sock:
-        sock.settimeout(PINE_TIMEOUT)
-        status = struct.unpack("<I", _pine_request(sock, PINE_MSG_STATUS)[:4])[0]
-        if status == PINE_STATUS_SHUTDOWN:
-            return None
-        reply = _pine_request(sock, PINE_MSG_TITLE)
-        length = struct.unpack("<I", reply[:4])[0]
-        title = reply[4:4 + length].split(b"\0", 1)[0].decode("utf-8", "replace").strip()
-        return title or None
-
-
-def find_pcsx2_game(running_exes):
-    # Only asked while PCSX2 runs, so an idle poll never opens a connection.
-    if not PCSX2_EXES & running_exes:
+def _pine_title(sock):
+    """Ask an open PINE connection for the running game's title, or None."""
+    sock.settimeout(PINE_TIMEOUT)
+    status = struct.unpack("<I", _pine_request(sock, PINE_MSG_STATUS)[:4])[0]
+    if status == PINE_STATUS_SHUTDOWN:
         return None
-    port = _coerce_int(CONFIG.get("PCSX2_PINE_SLOT"), 28011, 1, 65535)
-    try:
-        title = pcsx2_query(port)
-    except (OSError, ValueError, struct.error) as e:
-        _log_pcsx2_error(f"PCSX2 PINE query on port {port} failed: {e}. "
-                         "Is PINE switched on in PCSX2's Advanced settings?")
-        return None
-    _log_pcsx2_error(None)
-    return title
+    reply = _pine_request(sock, PINE_MSG_TITLE)
+    length = struct.unpack("<I", reply[:4])[0]
+    title = reply[4:4 + length].split(b"\0", 1)[0].decode("utf-8", "replace").strip()
+    return title or None
 
 
-_PCSX2_LAST_ERROR = [None]
+# The last error logged per emulator, so a persistent failure is logged once.
+_PINE_LAST_ERROR = {}
 
 
-def _log_pcsx2_error(message):
-    """Log a PINE failure once, not on every poll while it persists."""
-    if message != _PCSX2_LAST_ERROR[0] and message:
+def _log_pine_error(label, message):
+    if message and message != _PINE_LAST_ERROR.get(label):
         debug_log(message)
-    _PCSX2_LAST_ERROR[0] = message
+    _PINE_LAST_ERROR[label] = message
+
+
+def pine_query(port):
+    """The running game's title from a PINE port, or None."""
+    with socket.create_connection(("127.0.0.1", port), timeout=PINE_TIMEOUT) as sock:
+        return _pine_title(sock)
+
+
+def find_pine_game(label, running_exes):
+    emu = PINE_EMULATORS[label]
+    # Only asked while the emulator runs, so an idle poll never connects.
+    if not emu["exes"] & running_exes:
+        return None
+    port = _coerce_int(CONFIG.get(emu["slot_key"]), emu["slot"], 1, 65535)
+    try:
+        title = pine_query(port)
+    except (OSError, ValueError, struct.error) as e:
+        _log_pine_error(label, f"{label} PINE query on port {port} failed: {e}. {emu['setup']}")
+        return None
+    _log_pine_error(label, None)
+    return title
 
 
 def league_mode_title():
@@ -2070,7 +2108,8 @@ def resolve_named_sources(processes, epic_title, running_exes=frozenset(),
             or find_minecraft_java(windows, snapshot or {})),
         ("Roblox", lambda: find_known_exe_game(running_exes, "Roblox")),
         ("Rockstar Games", lambda: find_known_exe_game(running_exes, "Rockstar Games")),
-        ("PCSX2", lambda: find_pcsx2_game(running_exes)),
+        ("PCSX2", lambda: find_pine_game("PCSX2", running_exes)),
+        ("RPCS3", lambda: find_pine_game("RPCS3", running_exes)),
     ]
 
     resolved = []
@@ -2277,6 +2316,8 @@ def build_diagnostic_report():
     out.append(f"  MQTT topic       : {get_state_topic()}")
     out.append(f"  Broker           : {CONFIG.get('MQTT_BROKER', '')}:{CONFIG.get('MQTT_PORT', '')}")
     out.append(f"  TLS              : {'on' if CONFIG.get('MQTT_TLS') else 'off'}")
+    if MQTT_SETUP_ERROR:
+        out.append(f"  MQTT             : {MQTT_SETUP_ERROR}")
     out.append(f"  Username set     : {'yes' if CONFIG.get('MQTT_USER') else 'no'}")
     out.append(f"  Password set     : {'yes' if CONFIG.get('MQTT_PASS') else 'no'}")
     out.append(f"  Poll interval    : {CONFIG.get('POLL_INTERVAL', '')}s")
@@ -2433,7 +2474,8 @@ def build_diagnostic_report():
         "Minecraft": "exe / javaw window",
         "Roblox": "game executable",
         "Rockstar Games": "game executable",
-        "PCSX2": "PINE"
+        "PCSX2": "PINE",
+        "RPCS3": "PINE"
     }
 
     section("DETECTION SOURCES, IN PRIORITY ORDER")
@@ -2618,8 +2660,12 @@ def rebuild_active_tables():
         debug_log(f"Platforms switched off: {', '.join(disabled)}")
 
 
+# Why MQTT is not connecting, for diagnostics. Empty when nothing is wrong.
+MQTT_SETUP_ERROR = ""
+
+
 def start_services():
-    global client, observer, custom_tracker, CONFIG, PROFILE_SANITIZED
+    global client, observer, custom_tracker, CONFIG, PROFILE_SANITIZED, MQTT_SETUP_ERROR
     global GOG_BY_PATH, GOG_BY_NAME, BATTLENET_BY_DIR
     global STEAM_BY_DIR, STEAM_BY_APPID, XBOX_BY_DIR
     debug_log("Starting Gaming Status Agent services...")
@@ -2628,9 +2674,11 @@ def start_services():
     PROFILE_SANITIZED = sanitize_topic_part(CONFIG.get("HA_DEVICE_NAME", "User"))
     rebuild_active_tables()
 
+    MQTT_SETUP_ERROR = ""
     client = _build_mqtt_client()
     client.on_connect = _on_connect
     client.on_disconnect = _on_disconnect
+    client.on_publish = _on_publish
 
     user = CONFIG.get("MQTT_USER", "")
     password = CONFIG.get("MQTT_PASS", "")
@@ -2643,24 +2691,30 @@ def start_services():
             client.tls_set(ca_certs=ca_cert or None)
             debug_log("MQTT TLS enabled.")
         except Exception as e:
-            debug_log(f"Failed to enable TLS, continuing without it: {e}")
+            # Connecting anyway would send the login unencrypted to a broker
+            # the user asked to reach over TLS. Detection still runs; nothing
+            # is published until the TLS settings are fixed.
+            MQTT_SETUP_ERROR = f"TLS setup failed, not connecting: {e}"
+            debug_log(f"MQTT {MQTT_SETUP_ERROR}. Fix the CA certificate or turn TLS off.")
+            client = None
 
-    # Last Will: if this machine sleeps, crashes or loses power, the broker
-    # publishes Offline on our behalf instead of leaving a stale game retained.
-    try:
-        client.will_set(get_state_topic(), json.dumps(_offline_payload()), qos=1, retain=True)
-    except Exception as e:
-        debug_log(f"Could not set MQTT last will: {e}")
+    if client:
+        # Last Will: if this machine sleeps, crashes or loses power, the broker
+        # publishes Offline on our behalf instead of leaving a stale game retained.
+        try:
+            client.will_set(get_state_topic(), json.dumps(_offline_payload()), qos=1, retain=True)
+        except Exception as e:
+            debug_log(f"Could not set MQTT last will: {e}")
 
-    try:
-        client.reconnect_delay_set(min_delay=1, max_delay=60)
-        # connect_async + loop_start retries on its own, so a broker that is
-        # still booting at login no longer leaves us permanently disconnected.
-        client.connect_async(CONFIG.get("MQTT_BROKER", "localhost"),
-                             CONFIG.get("MQTT_PORT", 1883), 60)
-        client.loop_start()
-    except Exception as e:
-        debug_log(f"MQTT setup failed (check IP/Port): {e}")
+        try:
+            client.reconnect_delay_set(min_delay=1, max_delay=60)
+            # connect_async + loop_start retries on its own, so a broker that is
+            # still booting at login no longer leaves us permanently disconnected.
+            client.connect_async(CONFIG.get("MQTT_BROKER", "localhost"),
+                                 CONFIG.get("MQTT_PORT", 1883), 60)
+            client.loop_start()
+        except Exception as e:
+            debug_log(f"MQTT setup failed (check IP/Port): {e}")
 
     observer = Observer()
     if platform_enabled("Epic") and os.path.exists(EPIC_LOG_DIR):
