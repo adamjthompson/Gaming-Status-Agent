@@ -19,10 +19,13 @@ over MQTT. It detects games from the following launchers and publishes a single 
 - Ubisoft
 - Xbox
 
-Home Assistant discovers the sensor automatically. No YAML required.
+Home Assistant discovers the sensor automatically. No YAML required. 
 
-A Linux version covers Steam (native and Proton), Heroic (Epic, GOG and Amazon),
-Lutris and PCSX2. See [Linux](#linux).
+A separate Linux version covers the following (see [Linux](#linux)):
+- Heroic (Epic, GOG and Amazon)
+- Lutris
+- PCSX2
+- Steam (native and Proton)
 
 ---
 
