@@ -486,19 +486,24 @@ Windows requires four numeric fields, so `1.1.0` is written into the exe as
 `1.1.0.0`. Suffixes like `1.1.0-beta` are rejected by the generator rather than
 silently producing a broken resource.
 
+Releases are numbered by date, separately from the app versions:
+`2026.10.1` is the first release of October 2026, `2026.10.2` the second. Bump
+`GSA_VERSION` in `windows/gsa_tracker.py` and `linux/gsa_linux.py` for whichever
+agents changed; the release notes list both.
+
 A release then looks like:
 
-1. Edit `GSA_VERSION` and commit.
-2. Tag and push it: `git tag v1.3.0 && git push origin v1.3.0`. Creating the
-   release from the GitHub Releases page with a new `v1.3.0` tag works too.
+1. Bump the `GSA_VERSION`s that changed, and commit.
+2. Tag and push: `git tag 2026.10.2 && git push origin 2026.10.2`. Creating
+   the release from the GitHub Releases page with a new tag works too.
 
 The **Release** workflow (`.github/workflows/release.yml`) then builds the exe on
 a Windows runner and attaches it to the release, along with a
-`gaming-status-agent-linux-v1.3.0.zip` of the Linux agent. Watch it under the
-repository's **Actions** tab; it takes a few minutes. It refuses to build if
-the tag doesn't match `GSA_VERSION`, so a release can never ship an exe that
-reports the wrong version. To rebuild an existing release, run the workflow by
-hand from the Actions tab and give it the tag.
+`gaming-status-agent-linux-2026.10.2.zip` of the Linux agent. Watch it under the
+repository's **Actions** tab; it takes a few minutes. A release created from
+the Releases page keeps the notes you wrote; one created by pushing a tag gets
+generated notes headed with both app versions. To rebuild an existing
+release, run the workflow by hand from the Actions tab and give it the tag.
 
 Exes are never committed to the repository (`*.exe` is gitignored). Use
 `build.bat` for local testing; releases come from the workflow.
