@@ -20,8 +20,8 @@ over MQTT. It detects games from the following launchers and publishes a single 
 
 Home Assistant discovers the sensor automatically. No YAML required.
 
-A Linux version covers Steam (native and Proton), Heroic (Epic, GOG and Amazon)
-and Lutris. See [Linux](#linux).
+A Linux version covers Steam (native and Proton), Heroic (Epic, GOG and Amazon),
+Lutris and PCSX2. See [Linux](#linux).
 
 ---
 
@@ -305,6 +305,7 @@ exactly like the Windows agent.
 | **Steam**, native and Proton *(off by default, as on Windows)* | Steam starts every game through its `reaper` wrapper with `AppId=<id>`, Proton games included. The title comes from the `appmanifest_*.acf` files in every Steam library. Native, Flatpak and Snap installs of Steam are all found. |
 | **Epic, GOG, Amazon Games** via [Heroic](https://heroicgameslauncher.com) | There are no official Linux clients for these stores, so Heroic is the launcher used. Heroic's installed-games lists give each game's folder; a running process inside that folder is that game, reported under its store (Epic, GOG or Amazon Games) with that store's gamertag. Native and Flatpak installs of Heroic are both found. |
 | **Lutris** | Reads the game name Lutris gives the game's process. A Steam game started from Lutris still reports as Steam. |
+| **PCSX2** | Asks the running emulator for the game's title over PINE, PCSX2's control socket. Native, AppImage and Flatpak builds all work. **PINE is off in PCSX2 by default:** turn it on under *Settings → Advanced → PINE*, then restart PCSX2 once so the socket is created. |
 | **Custom** | Rules by process name (use `game.exe` for a Wine or Proton game) or by window title. Window-title rules need an X11 session and `wmctrl`. Wayland doesn't allow listing other apps' windows, so use process-name rules there. |
 
 ### Install
@@ -323,6 +324,11 @@ Files live in `~/.config/gaming-status-agent/` (`gsa_config.json`,
 `gsa_debug.log`). If the `keyring` package and a desktop keyring are available,
 the MQTT password is stored there rather than in the config file. Otherwise it
 is kept in the config file, which only your user can read.
+
+At login the agent can start before KWallet or GNOME Keyring is ready. When
+that happens it keeps running and detecting games, checks the keyring again
+every 10 seconds, and connects to MQTT once it can read the password. Home
+Assistant shows the current game as soon as it connects.
 
 ### Running without a tray icon
 
@@ -347,7 +353,7 @@ and restart the service to apply the changes.
 ### Diagnostics
 
 `python3 gsa_linux.py --diagnose` prints what the agent finds (Steam libraries,
-Heroic installs, running launchers) and what it would publish right now. The
+Heroic installs, PCSX2 PINE sockets, running launchers) and what it would publish right now. The
 tray's **Run Diagnostics** shows the same report.
 
 ### More than one computer

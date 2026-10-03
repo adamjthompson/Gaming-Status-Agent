@@ -21,6 +21,7 @@ import re
 import glob
 import signal
 import socket
+import struct
 import shutil
 import logging
 import argparse
@@ -65,6 +66,9 @@ MAX_ANCESTRY_DEPTH = 20
 SETTLE_TICKS = 2
 KEYRING_SERVICE = "gaming-status-agent"
 KEYRING_MARKER = "keyring:"
+# In-memory CONFIG flag: the password is in the keyring but could not be read.
+KEYRING_PENDING = "_MQTT_PASS_PENDING"
+KEYRING_RETRY_SECONDS = 10
 MACHINE_NAME = socket.gethostname()
 
 GENERIC_ACCOUNT_NAMES = {"root", "admin", "user", "default", "guest", "deck"}
@@ -97,7 +101,8 @@ IGNORE_NAMES = {
 
 # Process name -> the label it launches for. Used only for diagnostics: Heroic
 # games are matched by install folder and Lutris by its own variables.
-LAUNCHER_PROCESSES = {"steam": "Steam", "heroic": "Heroic", "lutris": "Lutris"}
+LAUNCHER_PROCESSES = {"steam": "Steam", "heroic": "Heroic", "lutris": "Lutris",
+                      "pcsx2-qt": "PCSX2", "pcsx2": "PCSX2"}
 
 WINE_DRIVE_RE = re.compile(r'^[zZ]:[\\/]')
 
@@ -121,6 +126,7 @@ DEFAULT_CONFIG = {
     "ENABLE_GOG": True,
     "ENABLE_AMAZON": True,
     "ENABLE_LUTRIS": True,
+    "ENABLE_PCSX2": True,
     "ENABLE_CUSTOM": False,
     "MQTT_BROKER": "192.168.1.xxx",
     "MQTT_PORT": 1883,
@@ -144,16 +150,18 @@ PLATFORM_ENABLE_KEYS = {
     "GOG": "ENABLE_GOG",
     "Amazon Games": "ENABLE_AMAZON",
     "Lutris": "ENABLE_LUTRIS",
+    "PCSX2": "ENABLE_PCSX2",
     "Custom": "ENABLE_CUSTOM"
 }
 
-PLATFORM_ORDER = ("Amazon Games", "Epic", "GOG", "Lutris", "Steam", "Custom")
+PLATFORM_ORDER = ("Amazon Games", "Epic", "GOG", "Lutris", "PCSX2", "Steam", "Custom")
 
 PLATFORM_NOTES = {
     "Amazon Games": "via Heroic",
     "Epic": "via Heroic",
     "GOG": "via Heroic",
     "Steam": "native and Proton",
+    "PCSX2": "needs PINE enabled in PCSX2",
 }
 
 # Filled in at startup and on every restart.
@@ -258,7 +266,14 @@ def encrypt_secret(plaintext):
     return plaintext
 
 
-def decrypt_secret(stored):
+def decrypt_secret(stored, rediscover=False):
+    """The MQTT password, or None if it is in the keyring and the keyring
+    cannot be read yet.
+
+    At login a systemd user service can start before KWallet or GNOME Keyring
+    is up. keyring then picks a backend that cannot read anything, and keeps
+    it, so a retry passes rediscover=True to choose the backend again.
+    """
     if not isinstance(stored, str):
         return ""
     if stored != KEYRING_MARKER:
@@ -266,12 +281,14 @@ def decrypt_secret(stored):
     kr = _keyring()
     if not kr:
         debug_log("Config refers to the keyring, but python keyring is not installed.")
-        return ""
+        return None
     try:
-        return kr.get_password(KEYRING_SERVICE, "MQTT_PASS") or ""
+        if rediscover:
+            kr.core.init_backend()
+        return kr.get_password(KEYRING_SERVICE, "MQTT_PASS")
     except Exception as e:
         debug_log(f"Could not read MQTT password from the keyring: {e}")
-        return ""
+        return None
 
 
 def load_config():
@@ -306,7 +323,11 @@ def load_config():
         if isinstance(raw, str):
             raw = raw.strip().lower() not in ("", "0", "false", "no", "off")
         merged[enable_key] = bool(raw)
-    merged["MQTT_PASS"] = decrypt_secret(merged.get("MQTT_PASS", ""))
+    password = decrypt_secret(merged.get("MQTT_PASS", ""))
+    # Kept in memory only: save_config() writes the marker back rather than
+    # erasing a password it could not read, and start_services() waits for it.
+    merged[KEYRING_PENDING] = password is None
+    merged["MQTT_PASS"] = password or ""
 
     if not isinstance(merged.get("CUSTOM_GAMES"), list):
         debug_log("CUSTOM_GAMES is not a list; ignoring it.")
@@ -319,7 +340,11 @@ def save_config(config=None):
     """Write config atomically, readable by this user only."""
     source = CONFIG if config is None else config
     to_write = dict(source)
-    to_write["MQTT_PASS"] = encrypt_secret(source.get("MQTT_PASS", ""))
+    pending = to_write.pop(KEYRING_PENDING, False)
+    if pending and not source.get("MQTT_PASS"):
+        to_write["MQTT_PASS"] = KEYRING_MARKER
+    else:
+        to_write["MQTT_PASS"] = encrypt_secret(source.get("MQTT_PASS", ""))
 
     tmp_path = CONFIG_FILE + ".tmp"
     try:
@@ -586,6 +611,82 @@ def find_lutris_game(snapshot):
     return None
 
 
+# --- PCSX2 (PINE) ---
+# PINE is PCSX2's IPC protocol. Each message is a little-endian u32 total size
+# followed by an opcode; each reply is the size, a result byte (0 = OK) and the
+# answer. PCSX2 must have PINE switched on (Settings > Advanced > PINE) and be
+# restarted once for the socket to appear.
+PINE_MSG_TITLE = 0x0B
+PINE_MSG_STATUS = 0x0F
+PINE_STATUS_SHUTDOWN = 2
+PINE_TIMEOUT = 0.5
+
+
+def pcsx2_socket_paths():
+    """Native and Flatpak socket locations. The default slot is pcsx2.sock;
+    any other slot number is appended as pcsx2.sock.<slot>."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    dirs = [runtime,
+            os.path.join(runtime, ".flatpak", "net.pcsx2.PCSX2", "xdg-run"),
+            os.path.join(runtime, "app", "net.pcsx2.PCSX2")]
+    paths = []
+    for d in dirs:
+        paths.extend(glob.glob(os.path.join(d, "pcsx2.sock")))
+        paths.extend(glob.glob(os.path.join(d, "pcsx2.sock.*")))
+    return paths
+
+
+def _pine_request(sock, opcode):
+    sock.sendall(struct.pack("<IB", 5, opcode))
+    header = _recv_exact(sock, 4)
+    size = struct.unpack("<I", header)[0]
+    if size < 5 or size > 64 * 1024:
+        raise ValueError(f"bad PINE reply size {size}")
+    body = _recv_exact(sock, size - 4)
+    if body[0] != 0:
+        raise ValueError("PINE request failed")
+    return body[1:]
+
+
+def _recv_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("PINE socket closed")
+        data += chunk
+    return data
+
+
+def pcsx2_query(path):
+    """The running game's title from one PINE socket, or None."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(PINE_TIMEOUT)
+        sock.connect(path)
+        status = struct.unpack("<I", _pine_request(sock, PINE_MSG_STATUS)[:4])[0]
+        if status == PINE_STATUS_SHUTDOWN:
+            return None
+        reply = _pine_request(sock, PINE_MSG_TITLE)
+        length = struct.unpack("<I", reply[:4])[0]
+        title = reply[4:4 + length].split(b"\0", 1)[0].decode("utf-8", "replace").strip()
+        return title or None
+
+
+def find_pcsx2_game(snapshot):
+    # A stale socket is left behind after a crash, so only ask while PCSX2 runs.
+    if not any(info["name"].startswith("pcsx2") for info in snapshot.values()):
+        return None
+    for path in pcsx2_socket_paths():
+        try:
+            title = pcsx2_query(path)
+        except (OSError, ValueError, struct.error) as e:
+            debug_log(f"PCSX2 PINE query on {path} failed: {e}")
+            continue
+        if title:
+            return title
+    return None
+
+
 # --- CUSTOM ---
 def get_window_titles():
     """Window titles, from wmctrl on X11. Wayland gives no way to list other
@@ -691,8 +792,9 @@ def resolve_sources(snapshot):
 
     Steam leads: its AppId is exact, and a Steam game started from Lutris or
     Heroic is still a Steam game. Heroic's install-folder match is next, then
-    Lutris, then Custom rules as the catch-all. The poller and diagnostics both
-    walk this list, so the report never disagrees with what is published.
+    Lutris, then PCSX2, then Custom rules as the catch-all. The poller and
+    diagnostics both walk this list, so the report never disagrees with what
+    is published.
     """
     resolved = []
 
@@ -713,6 +815,8 @@ def resolve_sources(snapshot):
 
     if platform_enabled("Lutris"):
         resolved.append(("Lutris", run("Lutris", lambda: find_lutris_game(snapshot))))
+    if platform_enabled("PCSX2"):
+        resolved.append(("PCSX2", run("PCSX2", lambda: find_pcsx2_game(snapshot))))
     if platform_enabled("Custom"):
         resolved.append(("Custom", run("Custom", lambda: find_custom_game(snapshot))))
     return resolved
@@ -887,21 +991,34 @@ class GamePoller(threading.Thread):
 
 
 # --- SERVICES ---
+# Set by stop_services() so a keyring wait from the previous run gives up
+# instead of connecting a client nobody will stop.
+SERVICES_STOP = threading.Event()
+# Serialises creating the MQTT client (possibly from the keyring wait) against
+# stop_services() taking it down.
+CLIENT_LOCK = threading.Lock()
+
+
 def stop_services():
     global client, poller
     debug_log("Stopping all background services...")
+    SERVICES_STOP.set()
     if poller:
         poller.stop()
         poller.join(timeout=2)
         poller = None
-    if client:
+    with CLIENT_LOCK:
+        old_client, client = client, None
+    if old_client:
         try:
-            publish_global_state("idle", "Offline", "None", wait=True)
-            client.loop_stop()
-            client.disconnect()
+            # client is already None, so publish through the old one directly.
+            publish_global_state("idle", "Offline", "None")
+            old_client.publish(get_state_topic(), json.dumps(_offline_payload()),
+                               qos=1, retain=True).wait_for_publish(timeout=2)
+            old_client.loop_stop()
+            old_client.disconnect()
         except Exception as e:
             debug_log(f"Error during MQTT shutdown: {e}")
-        client = None
 
 
 def scan_installed_games():
@@ -911,7 +1028,7 @@ def scan_installed_games():
 
 
 def start_services():
-    global client, poller, CONFIG, PROFILE_SANITIZED
+    global poller, CONFIG, PROFILE_SANITIZED, SERVICES_STOP
     debug_log("Starting Gaming Status Agent services...")
 
     CONFIG = load_config()
@@ -920,7 +1037,44 @@ def start_services():
     if disabled:
         debug_log(f"Platforms switched off: {', '.join(disabled)}")
 
-    client = _build_mqtt_client()
+    SERVICES_STOP = threading.Event()
+    if CONFIG.get(KEYRING_PENDING):
+        # Connecting without the password would be refused, and would never be
+        # retried with it, so the connection waits until the keyring answers.
+        threading.Thread(target=_await_keyring_then_connect, args=(SERVICES_STOP,),
+                         daemon=True).start()
+    else:
+        _connect_mqtt(SERVICES_STOP)
+
+    scan_installed_games()
+    poller = GamePoller()
+    poller.start()
+    debug_log("Game poller started successfully")
+
+
+def _await_keyring_then_connect(stop_event):
+    debug_log(f"MQTT password is in the keyring, which is not available yet; "
+              f"retrying every {KEYRING_RETRY_SECONDS}s before connecting.")
+    while not stop_event.wait(KEYRING_RETRY_SECONDS):
+        password = decrypt_secret(KEYRING_MARKER, rediscover=True)
+        if password is not None:
+            CONFIG["MQTT_PASS"] = password
+            CONFIG.pop(KEYRING_PENDING, None)
+            debug_log("MQTT password read from the keyring; connecting.")
+            _connect_mqtt(stop_event)
+            return
+
+
+def _connect_mqtt(stop_event):
+    global client
+    with CLIENT_LOCK:
+        if stop_event.is_set():
+            return
+        client = _build_mqtt_client()
+        _configure_and_connect(client)
+
+
+def _configure_and_connect(client):
     client.on_connect = _on_connect
     client.on_disconnect = _on_disconnect
 
@@ -949,11 +1103,6 @@ def start_services():
         client.loop_start()
     except Exception as e:
         debug_log(f"MQTT setup failed (check IP/Port): {e}")
-
-    scan_installed_games()
-    poller = GamePoller()
-    poller.start()
-    debug_log("Game poller started successfully")
 
 
 RESTART_LOCK = threading.Lock()
@@ -1004,6 +1153,12 @@ def build_diagnostic_report():
     if reapers:
         out.append(f"Steam AppIds running: {', '.join(sorted(set(reapers)))}")
 
+    if CONFIG.get(KEYRING_PENDING):
+        out.append(f"MQTT password: waiting for the keyring (retrying every {KEYRING_RETRY_SECONDS}s)")
+    if platform_enabled("PCSX2"):
+        sockets = pcsx2_socket_paths()
+        out.append("PCSX2 PINE sockets: " + (", ".join(sockets) if sockets else
+                   "none (enable PINE in PCSX2's Advanced settings, then restart PCSX2)"))
     if platform_enabled("Custom"):
         titles = get_window_titles()
         out.append("Window-title rules: " + ("available (wmctrl)" if titles is not None else
@@ -1157,6 +1312,8 @@ def show_settings_ui():
             CONFIG[key] = val
         CONFIG["MQTT_TLS"] = bool(tls_var.get())
         CONFIG["MQTT_CA_CERT"] = ca_var.get().strip()
+        if CONFIG["MQTT_PASS"]:
+            CONFIG.pop(KEYRING_PENDING, None)
         _save_and_close("settings", win)
 
     _finish_settings_window(win, row, save)
