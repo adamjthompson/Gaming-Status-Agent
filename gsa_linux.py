@@ -33,7 +33,7 @@ from datetime import datetime
 import paho.mqtt.client as mqtt
 import psutil
 
-GSA_VERSION = "1.0.1"
+GSA_VERSION = "1.0.2"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -126,7 +126,8 @@ DEFAULT_CONFIG = {
     "ENABLE_GOG": True,
     "ENABLE_AMAZON": True,
     "ENABLE_LUTRIS": True,
-    "ENABLE_PCSX2": True,
+    # Off until asked for: it only works once PINE is switched on in PCSX2.
+    "ENABLE_PCSX2": False,
     "ENABLE_CUSTOM": False,
     "MQTT_BROKER": "192.168.1.xxx",
     "MQTT_PORT": 1883,
@@ -676,15 +677,31 @@ def find_pcsx2_game(snapshot):
     # A stale socket is left behind after a crash, so only ask while PCSX2 runs.
     if not any(info["name"].startswith("pcsx2") for info in snapshot.values()):
         return None
-    for path in pcsx2_socket_paths():
+    paths = pcsx2_socket_paths()
+    if not paths:
+        _log_pcsx2_error("PCSX2 is running but has no PINE socket. "
+                         "Is PINE switched on in PCSX2's Advanced settings?")
+        return None
+    for path in paths:
         try:
             title = pcsx2_query(path)
         except (OSError, ValueError, struct.error) as e:
-            debug_log(f"PCSX2 PINE query on {path} failed: {e}")
+            _log_pcsx2_error(f"PCSX2 PINE query on {path} failed: {e}")
             continue
+        _log_pcsx2_error(None)
         if title:
             return title
     return None
+
+
+_PCSX2_LAST_ERROR = [None]
+
+
+def _log_pcsx2_error(message):
+    """Log a PINE failure once, not on every poll while it persists."""
+    if message != _PCSX2_LAST_ERROR[0] and message:
+        debug_log(message)
+    _PCSX2_LAST_ERROR[0] = message
 
 
 # --- CUSTOM ---

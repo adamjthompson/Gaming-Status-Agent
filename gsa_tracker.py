@@ -4,6 +4,8 @@ import json
 import re
 import time
 import base64
+import socket
+import struct
 import logging
 import winreg
 import threading
@@ -23,7 +25,7 @@ import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.2.2"
+GSA_VERSION = "1.2.3"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -200,6 +202,10 @@ DEFAULT_CONFIG = {
     "ENABLE_MINECRAFT": False,
     "ENABLE_ROBLOX": False,
     "ENABLE_ROCKSTAR": False,
+    # Off until asked for: it only works once PINE is switched on in PCSX2.
+    "ENABLE_PCSX2": False,
+    # PCSX2's PINE slot, which on Windows is the TCP port it listens on.
+    "PCSX2_PINE_SLOT": 28011,
     "MQTT_BROKER": "192.168.1.xxx",
     "MQTT_PORT": 1883,
     # Blank so a broker that allows anonymous access connects on first run.
@@ -251,6 +257,7 @@ PLATFORM_ENABLE_KEYS = {
     "Minecraft": "ENABLE_MINECRAFT",
     "Roblox": "ENABLE_ROBLOX",
     "Rockstar Games": "ENABLE_ROCKSTAR",
+    "PCSX2": "ENABLE_PCSX2",
     "Custom": "ENABLE_CUSTOM"
 }
 
@@ -258,8 +265,11 @@ PLATFORM_ENABLE_KEYS = {
 # log: alphabetical, so a platform is easy to find, with Custom last as the
 # catch-all. Detection priority is set separately, in resolve_named_sources().
 PLATFORM_ORDER = ("Amazon Games", "Battle.net", "EA", "Epic", "GOG",
-                  "HoYoverse", "Minecraft", "Playnite", "Riot Games", "Roblox",
-                  "Rockstar Games", "Steam", "Ubisoft", "Xbox", "Custom")
+                  "HoYoverse", "Minecraft", "PCSX2", "Playnite", "Riot Games",
+                  "Roblox", "Rockstar Games", "Steam", "Ubisoft", "Xbox", "Custom")
+
+# Shown after a platform's name wherever platforms are listed.
+PLATFORM_NOTES = {"PCSX2": "needs PINE enabled in PCSX2"}
 
 
 def platform_enabled(launcher_name):
@@ -363,6 +373,9 @@ IGNORE_EXES = {
     # is deliberately not listed here; Rockstar detection never relies on it.
     "rockstarservice.exe", "socialclubhelper.exe", "rockstarerrorhandler.exe",
     "rockstarsteamhelper.exe", "playgtav.exe", "playrdr2.exe", "playgtaiv.exe"
+    # PCSX2 is deliberately not listed. Its PINE source outranks window
+    # ancestry, and when PINE is off its window title is still the only name
+    # a Playnite-launched PS2 game has.
 }
 
 # Executable names too generic to identify a game on their own. A GOG title
@@ -1837,7 +1850,7 @@ def snapshot_processes():
 # all, so a machine with everything switched off does no work per tick.
 PROCESS_BACKED_PLATFORMS = ("Epic", "Steam", "GOG", "Battle.net", "Xbox",
                             "Riot Games", "HoYoverse", "Minecraft", "Roblox",
-                            "Rockstar Games", "Custom")
+                            "Rockstar Games", "PCSX2", "Custom")
 
 
 def poll_work_needed():
@@ -1900,6 +1913,77 @@ LEAGUE_MODE_CACHE_SECONDS = 30
 # poll for its whole timeout; wait this long before asking again.
 LEAGUE_MODE_RETRY_SECONDS = 15
 _LEAGUE_MODE = {"title": None, "checked": 0.0, "failed": -1e9}
+
+
+# --- PCSX2 (PINE) ---
+# PINE is PCSX2's control protocol; on Windows it listens on 127.0.0.1 at the
+# slot number. Each message is a little-endian u32 total size and an opcode;
+# each reply is the size, a result byte (0 = OK) and the answer. PCSX2 must
+# have PINE switched on (Settings > Advanced > PINE) and be restarted once.
+PCSX2_EXES = {"pcsx2-qt.exe", "pcsx2.exe"}
+PINE_MSG_TITLE = 0x0B
+PINE_MSG_STATUS = 0x0F
+PINE_STATUS_SHUTDOWN = 2
+PINE_TIMEOUT = 0.5
+
+
+def _recv_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("PINE socket closed")
+        data += chunk
+    return data
+
+
+def _pine_request(sock, opcode):
+    sock.sendall(struct.pack("<IB", 5, opcode))
+    size = struct.unpack("<I", _recv_exact(sock, 4))[0]
+    if size < 5 or size > 64 * 1024:
+        raise ValueError(f"bad PINE reply size {size}")
+    body = _recv_exact(sock, size - 4)
+    if body[0] != 0:
+        raise ValueError("PINE request failed")
+    return body[1:]
+
+
+def pcsx2_query(port):
+    """The running game's title from PCSX2's PINE port, or None."""
+    with socket.create_connection(("127.0.0.1", port), timeout=PINE_TIMEOUT) as sock:
+        sock.settimeout(PINE_TIMEOUT)
+        status = struct.unpack("<I", _pine_request(sock, PINE_MSG_STATUS)[:4])[0]
+        if status == PINE_STATUS_SHUTDOWN:
+            return None
+        reply = _pine_request(sock, PINE_MSG_TITLE)
+        length = struct.unpack("<I", reply[:4])[0]
+        title = reply[4:4 + length].split(b"\0", 1)[0].decode("utf-8", "replace").strip()
+        return title or None
+
+
+def find_pcsx2_game(running_exes):
+    # Only asked while PCSX2 runs, so an idle poll never opens a connection.
+    if not PCSX2_EXES & running_exes:
+        return None
+    port = _coerce_int(CONFIG.get("PCSX2_PINE_SLOT"), 28011, 1, 65535)
+    try:
+        title = pcsx2_query(port)
+    except (OSError, ValueError, struct.error) as e:
+        _log_pcsx2_error(f"PCSX2 PINE query on port {port} failed: {e}. "
+                         "Is PINE switched on in PCSX2's Advanced settings?")
+        return None
+    _log_pcsx2_error(None)
+    return title
+
+
+_PCSX2_LAST_ERROR = [None]
+
+
+def _log_pcsx2_error(message):
+    """Log a PINE failure once, not on every poll while it persists."""
+    if message != _PCSX2_LAST_ERROR[0] and message:
+        debug_log(message)
+    _PCSX2_LAST_ERROR[0] = message
 
 
 def league_mode_title():
@@ -1984,6 +2068,7 @@ def resolve_named_sources(processes, epic_title, running_exes=frozenset(),
             or find_minecraft_java(windows, snapshot or {})),
         ("Roblox", lambda: find_known_exe_game(running_exes, "Roblox")),
         ("Rockstar Games", lambda: find_known_exe_game(running_exes, "Rockstar Games")),
+        ("PCSX2", lambda: find_pcsx2_game(running_exes)),
     ]
 
     resolved = []
@@ -2345,7 +2430,8 @@ def build_diagnostic_report():
         "HoYoverse": "game executable",
         "Minecraft": "exe / javaw window",
         "Roblox": "game executable",
-        "Rockstar Games": "game executable"
+        "Rockstar Games": "game executable",
+        "PCSX2": "PINE"
     }
 
     section("DETECTION SOURCES, IN PRIORITY ORDER")
@@ -2837,7 +2923,7 @@ def _add_platform_checks(win, row, notes=None):
     notes maps a label to text shown after its name. Returns ({label: var},
     next row). Shared by the tray window and the wizard.
     """
-    notes = notes or {}
+    notes = {**PLATFORM_NOTES, **(notes or {})}
     vars_dict = {}
     for label in PLATFORM_ORDER:
         var = tk.BooleanVar(value=platform_enabled(label))

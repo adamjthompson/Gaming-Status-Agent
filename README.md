@@ -10,6 +10,7 @@ over MQTT. It detects games from the following launchers and publishes a single 
 - GOG
 - HoYoverse
 - Minecraft
+- PCSX2 (PlayStation 2 emulator)
 - Playnite (including emulated titles launched through Playnite)
 - Riot Games
 - Roblox
@@ -119,7 +120,9 @@ Gaming Status Agent uses whichever source knows the game's real name, in this or
    it reports as "Roblox" rather than the experience being played.
    Rockstar Games covers titles bought from Rockstar directly; Steam and Epic
    copies still report under those stores.
-7. **Window ancestry** — for everything else, finds a visible window whose
+7. **PCSX2** *(off by default)* — asks the running emulator for the game's
+   title over PINE, PCSX2's control port. See [PCSX2](#pcsx2) below.
+8. **Window ancestry** — for everything else, finds a visible window whose
    process descends from a known launcher and uses its title.
 
 Sources that know a game's real name outrank raw window titles, so a
@@ -157,6 +160,22 @@ deliberate configuration rather than automatic detection.
 These are matched by fixed executable names rather than a launcher's own
 records, so they stay off until you switch them on under **Platforms**. Once
 HoYoverse is on, a Custom Games rule for `genshinimpact.exe` is no longer needed.
+
+### PCSX2
+
+PCSX2 reports the game you're playing over PINE, its built-in control
+interface. To use it:
+
+1. In PCSX2, turn on PINE under *Settings → Advanced → PINE*, and leave the
+   slot at the default **28011**.
+2. Restart PCSX2 once so PINE starts listening.
+3. In Gaming Status Agent, switch on **PCSX2** under **Platforms**.
+
+It stays off by default because nothing works until PINE is turned on in
+PCSX2. If you changed PCSX2's PINE slot, set `PCSX2_PINE_SLOT` in
+`gsa_config.json` to match. A PS2 game launched from Playnite also reports as
+**PCSX2** with its proper title, rather than as Playnite with the emulator's
+window title.
 
 ### What Playnite does and doesn't cover
 
@@ -305,7 +324,7 @@ exactly like the Windows agent.
 | **Steam**, native and Proton *(off by default, as on Windows)* | Steam starts every game through its `reaper` wrapper with `AppId=<id>`, Proton games included. The title comes from the `appmanifest_*.acf` files in every Steam library. Native, Flatpak and Snap installs of Steam are all found. |
 | **Epic, GOG, Amazon Games** via [Heroic](https://heroicgameslauncher.com) | There are no official Linux clients for these stores, so Heroic is the launcher used. Heroic's installed-games lists give each game's folder; a running process inside that folder is that game, reported under its store (Epic, GOG or Amazon Games) with that store's gamertag. Native and Flatpak installs of Heroic are both found. |
 | **Lutris** | Reads the game name Lutris gives the game's process. A Steam game started from Lutris still reports as Steam. |
-| **PCSX2** | Asks the running emulator for the game's title over PINE, PCSX2's control socket. Native, AppImage and Flatpak builds all work. **PINE is off in PCSX2 by default:** turn it on under *Settings → Advanced → PINE*, then restart PCSX2 once so the socket is created. |
+| **PCSX2** | Asks the running emulator for the game's title over PINE, PCSX2's control socket. Native, AppImage and Flatpak builds all work. *Off by default.* PINE is also off in PCSX2 by default: turn it on under *Settings → Advanced → PINE*, restart PCSX2 once so the socket is created, then switch on **PCSX2** under **Platforms**. |
 | **Custom** | Rules by process name (use `game.exe` for a Wine or Proton game) or by window title. Window-title rules need an X11 session and `wmctrl`. Wayland doesn't allow listing other apps' windows, so use process-name rules there. |
 
 ### Install
