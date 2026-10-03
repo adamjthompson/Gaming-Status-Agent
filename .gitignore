@@ -35,3 +35,8 @@ env/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Release builds are attached to GitHub Releases by .github/workflows/release.yml,
+# never committed: each 19 MB copy would stay in git history for good.
+*.exe
+version_info.txt

@@ -33,8 +33,8 @@ if not exist "gsa_tracker.py" (
     goto :end
 )
 
-if not exist "gsa_icon.ico" (
-    echo ERROR: gsa_icon.ico not found in %CD%.
+if not exist "..\assets\gsa_icon.ico" (
+    echo ERROR: ..\assets\gsa_icon.ico not found.
     echo The build references it twice and PyInstaller will refuse to start.
     goto :end
 )
@@ -75,8 +75,8 @@ echo.
     --onefile ^
     --windowed ^
     --name "Gaming Status Agent" ^
-    --icon=gsa_icon.ico ^
-    --add-data "gsa_icon.ico;." ^
+    --icon=..\assets\gsa_icon.ico ^
+    --add-data "..\assets\gsa_icon.ico;." ^
     %VERFLAG% ^
     gsa_tracker.py
 

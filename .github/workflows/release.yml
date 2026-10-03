@@ -1,0 +1,81 @@
+# Builds Gaming Status Agent.exe on Windows and attaches it, plus a Linux
+# archive, to the GitHub Release for the tag. Runs when a v* tag is pushed,
+# including one created from the Releases page.
+#
+#   1. Set GSA_VERSION in windows/gsa_tracker.py and commit.
+#   2. git tag v1.3.0 && git push origin v1.3.0
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to rebuild and re-upload, e.g. v1.3.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # A tag that disagrees with GSA_VERSION would ship an exe reporting the
+      # wrong version in its diagnostics and Properties -> Details.
+      - name: Check tag matches GSA_VERSION
+        run: |
+          $line = Select-String -Path windows/gsa_tracker.py -Pattern '^GSA_VERSION = "(.+)"'
+          $version = $line.Matches[0].Groups[1].Value
+          if ("v$version" -ne $env:TAG) {
+            Write-Error "Tag $env:TAG does not match GSA_VERSION $version in windows/gsa_tracker.py"
+            exit 1
+          }
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r windows/requirements.txt "pyinstaller>=6.0"
+
+      - name: Build exe
+        working-directory: windows
+        run: |
+          python make_version_info.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed `
+            --name "Gaming Status Agent" `
+            --icon=../assets/gsa_icon.ico `
+            --add-data '../assets/gsa_icon.ico;.' `
+            --version-file=version_info.txt `
+            gsa_tracker.py
+
+      - name: Package Linux agent
+        run: |
+          New-Item -ItemType Directory -Force staging/gaming-status-agent | Out-Null
+          Copy-Item -Recurse linux, assets, README.md staging/gaming-status-agent/
+          Compress-Archive -Path staging/gaming-status-agent -DestinationPath "gaming-status-agent-linux-$env:TAG.zip"
+
+      - name: Publish release
+        run: |
+          $files = @("windows/dist/Gaming Status Agent.exe", "gaming-status-agent-linux-$env:TAG.zip")
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:TAG @files --clobber
+          } else {
+            gh release create $env:TAG @files --title "Gaming Status Agent $env:TAG" --generate-notes
+          }

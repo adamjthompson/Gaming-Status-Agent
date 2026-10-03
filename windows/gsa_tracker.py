@@ -508,8 +508,10 @@ def debug_log(message):
 
 # --- HELPER FUNCTIONS ---
 def resource_path(relative_path):
-    base_path = getattr(sys, '_MEIPASS', BASE_DIR)
-    return os.path.join(base_path, relative_path)
+    """A bundled file: inside the exe when frozen, else the repo's assets folder."""
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(BASE_DIR, os.pardir, "assets", relative_path)
 
 
 def sanitize_topic_part(name):

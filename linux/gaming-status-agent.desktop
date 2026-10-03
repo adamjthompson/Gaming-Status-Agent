@@ -2,7 +2,7 @@
 Type=Application
 Name=Gaming Status Agent
 Comment=Report what you're playing to Home Assistant
-Exec=sh -c 'python3 "$HOME/gaming-status-agent/gsa_linux.py"'
+Exec=sh -c 'python3 "$HOME/gaming-status-agent/linux/gsa_linux.py"'
 Icon=input-gaming
 Categories=Game;Utility;
 Terminal=false

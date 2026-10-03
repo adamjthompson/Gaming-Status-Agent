@@ -28,22 +28,32 @@ Lutris and PCSX2. See [Linux](#linux).
 
 ## Requirements
 
-- Windows, or Linux for `gsa_linux.py` (see [Linux](#linux))
+- Windows, or Linux for `linux/gsa_linux.py` (see [Linux](#linux))
 - A Home Assistant instance with the [MQTT integration](https://www.home-assistant.io/integrations/mqtt/)
   set up and a broker it can reach (Mosquitto is the usual choice)
 - Python 3.8+ if running from source
  
 ## Install
 
-**From a release:** download `Gaming Status Agent.exe`, put it anywhere you like, and run it.
+**From a release:** download `Gaming Status Agent.exe` from the
+[Releases page](../../releases/latest), put it anywhere you like, and run it.
 It creates its config file next to itself, so a dedicated folder is tidiest.
 
 **From source:**
 
 ```
-pip install -r requirements.txt
-python gsa_tracker.py
+pip install -r windows/requirements.txt
+python windows/gsa_tracker.py
 ```
+
+### Repository layout
+
+| Folder | Contents |
+|---|---|
+| `windows/` | The Windows agent (`gsa_tracker.py`), its build script and requirements |
+| `linux/` | The Linux agent (`gsa_linux.py`), requirements, systemd service and desktop entry |
+| `assets/` | `gsa_icon.ico`, used by both agents |
+| `catalog.json` | Ubisoft game names. Stays at the root: released exes download it from there |
 
 On first run a short setup wizard walks you through three pages:
 
@@ -313,7 +323,7 @@ gsa_ubi_ids.json     cached game-name catalog
 
 ## Linux
 
-`gsa_linux.py` is a separate agent for Linux. It publishes the same sensor in
+`linux/gsa_linux.py` is a separate agent for Linux. It publishes the same sensor in
 the same format, so Home Assistant and the Gaming Status integration treat it
 exactly like the Windows agent.
 
@@ -331,9 +341,13 @@ exactly like the Windows agent.
 
 ```
 sudo apt install python3-tk gir1.2-ayatanaappindicator3-0.1   # Debian/Ubuntu; tray icon support
-pip install -r requirements-linux.txt
-python3 gsa_linux.py
+pip install -r linux/requirements-linux.txt
+python3 linux/gsa_linux.py
 ```
+
+Use a clone of this repository, or the `gaming-status-agent-linux` zip from the
+[Releases page](../../releases/latest). Keep the `linux` and `assets` folders
+side by side.
 
 On first run the agent writes a default config, turns on **Start at login**, and
 opens the **MQTT Settings** and **Platforms** windows. Everything is editable
@@ -354,11 +368,11 @@ Assistant shows the current game as soon as it connects.
 On a desktop without a system tray, or to run as a service:
 
 ```
-python3 gsa_linux.py --headless
+python3 linux/gsa_linux.py --headless
 ```
 
-To start it at login with systemd, copy this repository to
-`~/gaming-status-agent/`, then:
+To start it at login with systemd, put the repository (or the release zip's
+folder) at `~/gaming-status-agent/`, then:
 
 ```
 cp linux/gaming-status-agent.service ~/.config/systemd/user/
@@ -371,7 +385,7 @@ and restart the service to apply the changes.
 
 ### Diagnostics
 
-`python3 gsa_linux.py --diagnose` prints what the agent finds (Steam libraries,
+`python3 linux/gsa_linux.py --diagnose` prints what the agent finds (Steam libraries,
 Heroic installs, PCSX2 PINE sockets, running launchers) and what it would publish right now. The
 tray's **Run Diagnostics** shows the same report.
 
@@ -385,18 +399,18 @@ one you're playing on.
 
 ## Building
 
-Double-click **`build.bat`**, or run it from a Command Prompt. It finds a Python
+Double-click **`windows\build.bat`**, or run it from a Command Prompt. It finds a Python
 interpreter, installs PyInstaller if needed, builds, and pauses so you can read
 the result.
 
-To do it by hand instead, from a **Command Prompt** in the project folder:
+To do it by hand instead, from a **Command Prompt** in the `windows` folder:
 
 ```
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name "Gaming Status Agent" --icon=gsa_icon.ico --add-data "gsa_icon.ico;." --version-file=version_info.txt gsa_tracker.py
+python -m PyInstaller --onefile --windowed --name "Gaming Status Agent" --icon=..\assets\gsa_icon.ico --add-data "..\assets\gsa_icon.ico;." --version-file=version_info.txt gsa_tracker.py
 ```
 
-The result is `dist\Gaming Status Agent.exe`. Copy it somewhere of its own — it writes
+The result is `windows\dist\Gaming Status Agent.exe`. Copy it somewhere of its own — it writes
 `gsa_config.json` and `gsa_debug.log` next to itself.
 
 `python -m PyInstaller` rather than a bare `pyinstaller` on purpose: pip puts
@@ -411,7 +425,7 @@ PyInstaller's source/destination separator, and PowerShell will otherwise treat
 it as a command separator:
 
 ```
-python -m PyInstaller --onefile --windowed --name "Gaming Status Agent" --icon=gsa_icon.ico --add-data 'gsa_icon.ico;.' --version-file=version_info.txt gsa_tracker.py
+python -m PyInstaller --onefile --windowed --name "Gaming Status Agent" --icon=..\assets\gsa_icon.ico --add-data '..\assets\gsa_icon.ico;.' --version-file=version_info.txt gsa_tracker.py
 ```
 
 What each flag is for:
@@ -429,24 +443,24 @@ Both icon flags are needed: `--icon` brands the executable, `--add-data` makes
 the file readable at runtime through `resource_path()`. Omit the second and the
 exe looks right in Explorer but falls back to the drawn placeholder once running.
 
-`gsa_icon.ico` is the tray and window icon. Replace it with your own and
+`assets\gsa_icon.ico` is the tray and window icon. Replace it with your own and
 rebuild - nothing in the code needs changing, and if the file is missing Gaming Status Agent
 falls back to a drawn placeholder rather than showing Tk's default feather.
 
 `version_info.txt` supplies the exe's Windows metadata. Its `FileDescription`
 is what Task Manager, Startup Apps and Properties → Details display; drop the
 flag and they all fall back to the filename. Keep its version numbers in step
-with `GSA_VERSION` in `gsa_tracker.py`, which the diagnostics report prints.
+with `GSA_VERSION` in `windows/gsa_tracker.py`, which the diagnostics report prints.
 
 `build\`, `dist\` and `Gaming Status Agent.spec` are build artifacts and are gitignored.
 
-`gsa_diagnose.py` is a command-line front end for the same diagnostics report
+`windows/gsa_diagnose.py` is a command-line front end for the same diagnostics report
 (`python gsa_diagnose.py > report.txt`). It's a development convenience and is
 not part of the build — the tray menu covers the same ground.
 
 ## Releasing
 
-The version lives in **one place**: `GSA_VERSION` in `gsa_tracker.py`.
+The version lives in **one place**: `GSA_VERSION` in `windows/gsa_tracker.py`.
 
 ```python
 GSA_VERSION = "1.1.0"
@@ -471,10 +485,20 @@ silently producing a broken resource.
 
 A release then looks like:
 
-1. Edit `GSA_VERSION`.
-2. Run `build.bat`.
-3. Confirm the exe shows the new version in Properties → Details.
-4. Tag it — `git tag v1.1.0 && git push --tags` — and attach `dist\Gaming Status Agent.exe`.
+1. Edit `GSA_VERSION` and commit.
+2. Tag and push it: `git tag v1.3.0 && git push origin v1.3.0`. Creating the
+   release from the GitHub Releases page with a new `v1.3.0` tag works too.
+
+The **Release** workflow (`.github/workflows/release.yml`) then builds the exe on
+a Windows runner and attaches it to the release, along with a
+`gaming-status-agent-linux-v1.3.0.zip` of the Linux agent. Watch it under the
+repository's **Actions** tab; it takes a few minutes. It refuses to build if
+the tag doesn't match `GSA_VERSION`, so a release can never ship an exe that
+reports the wrong version. To rebuild an existing release, run the workflow by
+hand from the Actions tab and give it the tag.
+
+Exes are never committed to the repository (`*.exe` is gitignored). Use
+`build.bat` for local testing; releases come from the workflow.
 
 Anyone sending a bug report will be quoting that version back to you: the
 diagnostics report is headed `Gaming Status Agent 1.1.0 diagnostics`, and `gsa_debug.log`

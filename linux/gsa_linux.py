@@ -1527,7 +1527,7 @@ def quit_app(icon, item):
 
 def create_image():
     from PIL import Image, ImageDraw
-    icon_path = os.path.join(BASE_DIR, "gsa_icon.ico")
+    icon_path = os.path.join(BASE_DIR, os.pardir, "assets", "gsa_icon.ico")
     if os.path.exists(icon_path):
         try:
             with Image.open(icon_path) as img:

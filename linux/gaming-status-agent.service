@@ -10,7 +10,7 @@ Description=Gaming Status Agent
 After=network-online.target graphical-session.target
 
 [Service]
-ExecStart=/usr/bin/python3 %h/gaming-status-agent/gsa_linux.py --headless
+ExecStart=/usr/bin/python3 %h/gaming-status-agent/linux/gsa_linux.py --headless
 Restart=on-failure
 RestartSec=10
 
