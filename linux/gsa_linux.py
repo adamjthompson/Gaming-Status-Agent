@@ -33,7 +33,7 @@ from datetime import datetime
 import paho.mqtt.client as mqtt
 import psutil
 
-GSA_VERSION = "1.1.1"
+GSA_VERSION = "1.1.2"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -290,6 +290,12 @@ def decrypt_secret(stored, rediscover=False):
         return None
     try:
         if rediscover:
+            # keyring caches the list of usable backends on first use, so
+            # init_backend() alone keeps choosing from the list made before
+            # the desktop keyring was up. Clear it so discovery really reruns.
+            backends = kr.backend.get_all_keyring
+            if hasattr(backends, "reset"):
+                backends.reset()
             kr.core.init_backend()
         return kr.get_password(KEYRING_SERVICE, "MQTT_PASS")
     except Exception as e:
