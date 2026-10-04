@@ -25,7 +25,7 @@ import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.3.0"
+GSA_VERSION = "1.3.1"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -2800,11 +2800,10 @@ def _focus_existing(name):
     return False
 
 
-def _make_settings_window(key, title, geometry):
+def _make_settings_window(key, title):
     win = tk.Toplevel(ROOT)
     OPEN_WINDOWS[key] = win
     win.title(title)
-    win.geometry(geometry)
     win.resizable(False, False)
     win.attributes('-topmost', True)
     win.protocol("WM_DELETE_WINDOW", lambda: (OPEN_WINDOWS.pop(key, None), win.destroy()))
@@ -2827,10 +2826,39 @@ def _add_entry_rows(win, fields, row=0):
 
 
 def _finish_settings_window(win, row, on_save):
+    """Add the Save button. No size is ever set on these windows: Tk fits each
+    one to its contents, so none has dead space or a cut-off button however
+    many rows it holds."""
     tk.Button(win, text="Save & Apply", command=on_save, width=20).grid(
-        row=row, column=0, columnspan=2, pady=15)
+        row=row, column=0, columnspan=2, padx=15, pady=15)
+    _close_button_only(win)
     win.focus_force()
     win.after_idle(win.attributes, '-topmost', False)
+
+
+GWL_STYLE = -16
+WS_MINIMIZEBOX = 0x00020000
+WS_MAXIMIZEBOX = 0x00010000
+SWP_FRAME_ONLY = 0x0027  # NOSIZE | NOMOVE | NOZORDER | FRAMECHANGED
+
+
+def _close_button_only(win):
+    """Drop the minimize and maximize buttons from a fixed-size dialog.
+
+    Windows keeps a greyed-out maximize button on a non-resizable window,
+    which leaves a wide gap in the title bar. With both boxes removed it
+    shows a close button alone, like any other settings dialog.
+    """
+    try:
+        win.update_idletasks()
+        user32 = ctypes.windll.user32
+        # winfo_id() is Tk's client window; the title bar belongs to its parent.
+        hwnd = user32.GetParent(win.winfo_id())
+        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+        user32.SetWindowLongW(hwnd, GWL_STYLE, style & ~(WS_MINIMIZEBOX | WS_MAXIMIZEBOX))
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FRAME_ONLY)
+    except Exception as e:
+        debug_log(f"Could not simplify the title bar: {e}")
 
 
 MQTT_FIELDS = [
@@ -2897,7 +2925,7 @@ def show_settings_ui():
     if _focus_existing("settings"):
         return
 
-    settings_win = _make_settings_window("settings", "Gaming Status Agent - MQTT Settings", "430x400")
+    settings_win = _make_settings_window("settings", "Gaming Status Agent - MQTT Settings")
     vars_dict, tls_var, ca_var, row = _add_mqtt_rows(settings_win)
 
     def save_settings():
@@ -2937,11 +2965,7 @@ def show_gamertags_ui():
         return
 
     fields = gamertag_fields()
-    # Two rows of padding plus the Save button, so the window fits its contents
-    # however many platforms are switched on.
-    height = 90 + 42 * max(len(fields), 1)
-    gt_win = _make_settings_window("gamertags", "Gaming Status Agent - Gamertags",
-                                   f"430x{height}")
+    gt_win = _make_settings_window("gamertags", "Gaming Status Agent - Gamertags")
 
     if not fields:
         tk.Label(gt_win, text="No tracked platform uses a gamertag.\n"
@@ -3000,7 +3024,7 @@ def show_platforms_ui():
     if _focus_existing("platforms"):
         return
 
-    plat_win = _make_settings_window("platforms", "Gaming Status Agent - Platforms", "430x490")
+    plat_win = _make_settings_window("platforms", "Gaming Status Agent - Platforms")
 
     tk.Label(plat_win, text="Which platforms should be tracked?",
              font=("", 9, "bold")).grid(row=0, column=0, columnspan=2,
@@ -3415,7 +3439,6 @@ def run_setup_wizard():
 
     win = tk.Toplevel(ROOT)
     win.title("Gaming Status Agent Setup")
-    win.geometry("480x615")
     win.resizable(False, False)
     win.attributes('-topmost', True)
 
@@ -3485,12 +3508,24 @@ def run_setup_wizard():
     buttons = tk.Frame(win)
     buttons.pack(fill=tk.X, side=tk.BOTTOM, pady=10)
 
+    def fit_to_pages():
+        """Size the window to its tallest page, so Next and Back don't make it
+        jump around and no page is ever cut off. It only ever grows: the
+        Gamertags page is rebuilt from the Platforms selection."""
+        win.update_idletasks()
+        width = max([480] + [p.winfo_reqwidth() for p in pages])
+        height = max(p.winfo_reqheight() for p in pages) + buttons.winfo_reqheight() + 20
+        width = max(width, win.winfo_width())
+        height = max(height, win.winfo_height())
+        win.geometry(f"{width}x{height}")
+
     def show(index):
         for page in pages:
             page.pack_forget()
         if index == 2:
             build_gamertags_page()
         pages[index].pack(fill=tk.BOTH, expand=True)
+        fit_to_pages()
         state["page"] = index
         back_btn.config(state=tk.DISABLED if index == 0 else tk.NORMAL)
         next_btn.config(text="Finish" if index == 2 else "Next >")
@@ -3536,6 +3571,7 @@ def run_setup_wizard():
     win.protocol("WM_DELETE_WINDOW", cancel)
 
     show(0)
+    _close_button_only(win)
     win.focus_force()
     win.after_idle(win.attributes, '-topmost', False)
     ROOT.wait_window(win)

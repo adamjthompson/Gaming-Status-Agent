@@ -33,7 +33,7 @@ from datetime import datetime
 import paho.mqtt.client as mqtt
 import psutil
 
-GSA_VERSION = "1.1.0"
+GSA_VERSION = "1.1.1"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -1343,12 +1343,11 @@ def _focus_existing(name):
     return False
 
 
-def _make_settings_window(key, title, geometry):
+def _make_settings_window(key, title):
     tk = _gui()[0]
     win = tk.Toplevel(ROOT)
     OPEN_WINDOWS[key] = win
     win.title(title)
-    win.geometry(geometry)
     win.resizable(False, False)
     win.protocol("WM_DELETE_WINDOW", lambda: (OPEN_WINDOWS.pop(key, None), win.destroy()))
     return win
@@ -1370,9 +1369,12 @@ def _add_entry_rows(win, fields, row=0):
 
 
 def _finish_settings_window(win, row, on_save):
+    """Add the Save button. No size is ever set on these windows: Tk fits each
+    one to its contents, so none has dead space or a cut-off button however
+    many rows it holds."""
     tk = _gui()[0]
     tk.Button(win, text="Save & Apply", command=on_save, width=20).grid(
-        row=row, column=0, columnspan=2, pady=15)
+        row=row, column=0, columnspan=2, padx=15, pady=15)
     win.focus_force()
 
 
@@ -1400,7 +1402,7 @@ def show_settings_ui():
     if _focus_existing("settings"):
         return
     tk, messagebox, _, _ = _gui()
-    win = _make_settings_window("settings", "Gaming Status Agent - MQTT Settings", "450x410")
+    win = _make_settings_window("settings", "Gaming Status Agent - MQTT Settings")
     vars_dict, row = _add_entry_rows(win, MQTT_FIELDS)
 
     tls_var = tk.BooleanVar(value=bool(CONFIG.get("MQTT_TLS", False)))
@@ -1446,8 +1448,7 @@ def show_gamertags_ui():
         return
     tk = _gui()[0]
     fields = gamertag_fields()
-    win = _make_settings_window("gamertags", "Gaming Status Agent - Gamertags",
-                                f"430x{90 + 42 * max(len(fields), 1)}")
+    win = _make_settings_window("gamertags", "Gaming Status Agent - Gamertags")
     if not fields:
         tk.Label(win, text="No tracked platform uses a gamertag.\n"
                            "Turn one on under Platforms first.",
@@ -1467,7 +1468,7 @@ def show_platforms_ui():
     if _focus_existing("platforms"):
         return
     tk = _gui()[0]
-    win = _make_settings_window("platforms", "Gaming Status Agent - Platforms", "430x330")
+    win = _make_settings_window("platforms", "Gaming Status Agent - Platforms")
     tk.Label(win, text="Which platforms should be tracked?",
              font=("", 10, "bold")).grid(row=0, column=0, columnspan=2,
                                          padx=15, pady=(12, 6), sticky="w")
