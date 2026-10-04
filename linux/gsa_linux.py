@@ -33,7 +33,7 @@ from datetime import datetime
 import paho.mqtt.client as mqtt
 import psutil
 
-GSA_VERSION = "1.1.2"
+GSA_VERSION = "1.1.3"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -176,6 +176,8 @@ STEAM_SCAN_INFO = {"root": "", "libraries": [], "games": 0}
 # [(install dir with trailing slash, title, launcher label)]
 HEROIC_GAMES = []
 HEROIC_SCAN_INFO = {"root": "", "Epic": 0, "GOG": 0, "Amazon Games": 0}
+# Heroic app name -> (title, launcher label), for games found by environment.
+HEROIC_BY_APP = {}
 
 
 def platform_enabled(launcher_name):
@@ -488,11 +490,10 @@ def find_steam_game(snapshot):
 
 
 # --- HEROIC (Epic, GOG, Amazon) ---
-def find_heroic_root():
-    for root in HEROIC_ROOTS:
-        if os.path.isdir(root):
-            return root
-    return ""
+def find_heroic_roots():
+    """Every Heroic config folder present. Native and Flatpak installs can
+    both exist, each listing different games, so all of them are read."""
+    return [root for root in HEROIC_ROOTS if os.path.isdir(root)]
 
 
 def _titles_from_library(data, list_key):
@@ -505,57 +506,80 @@ def _titles_from_library(data, list_key):
     return titles
 
 
+# Heroic's HEROIC_APP_SOURCE value -> the store label it is reported under.
+HEROIC_SOURCES = {"legendary": "Epic", "epic": "Epic", "gog": "GOG",
+                  "nile": "Amazon Games", "amazon": "Amazon Games"}
+
+
 def get_heroic_games():
-    """[(install dir, title, launcher label)] for every game Heroic installed."""
+    """[(install dir, title, launcher label)] for every game Heroic installed.
+
+    Also fills HEROIC_BY_APP, app name -> (title, label), for the environment
+    fallback in find_heroic_game().
+    """
+    global HEROIC_BY_APP
     games = []
-    root = find_heroic_root()
+    by_app = {}
+    seen_dirs = set()
+    roots = find_heroic_roots()
     counts = {"Epic": 0, "GOG": 0, "Amazon Games": 0}
-    if not root:
-        HEROIC_SCAN_INFO.update({"root": "", **counts})
-        return games
 
-    def add(path, title, label):
-        if path and title and os.path.isdir(os.path.expanduser(path)):
-            games.append((_normalised_dir(path), str(title), label))
-            counts[label] += 1
+    def add(app_name, path, title, label):
+        if not title:
+            return
+        title = str(title)
+        if app_name:
+            by_app[str(app_name)] = (title, label)
+        if not path or not os.path.isdir(os.path.expanduser(path)):
+            return
+        install_dir = _normalised_dir(path)
+        if install_dir in seen_dirs:
+            return
+        seen_dirs.add(install_dir)
+        games.append((install_dir, title, label))
+        counts[label] += 1
 
-    # Epic, through legendary. installed.json carries the title itself.
-    if platform_enabled("Epic"):
-        data = _read_json(os.path.join(root, "legendaryConfig", "legendary", "installed.json"))
-        if isinstance(data, dict):
-            for app in data.values():
+    for root in roots:
+        # Epic, through legendary. installed.json carries the title itself.
+        if platform_enabled("Epic"):
+            data = _read_json(os.path.join(root, "legendaryConfig", "legendary", "installed.json"))
+            if isinstance(data, dict):
+                for key, app in data.items():
+                    if isinstance(app, dict):
+                        add(app.get("app_name") or key, app.get("install_path"),
+                            app.get("title"), "Epic")
+
+        # GOG, through gogdl. Titles come from Heroic's library cache.
+        if platform_enabled("GOG"):
+            titles = _titles_from_library(
+                _read_json(os.path.join(root, "store_cache", "gog_library.json")), "games")
+            data = _read_json(os.path.join(root, "gog_store", "installed.json"))
+            installed = data.get("installed", []) if isinstance(data, dict) else []
+            for app in installed:
                 if isinstance(app, dict):
-                    add(app.get("install_path"), app.get("title"), "Epic")
+                    path = app.get("install_path")
+                    title = titles.get(str(app.get("appName"))) or (
+                        os.path.basename(os.path.normpath(path)) if path else None)
+                    add(app.get("appName"), path, title, "GOG")
 
-    # GOG, through gogdl. Titles come from Heroic's library cache.
-    if platform_enabled("GOG"):
-        titles = _titles_from_library(
-            _read_json(os.path.join(root, "store_cache", "gog_library.json")), "games")
-        data = _read_json(os.path.join(root, "gog_store", "installed.json"))
-        installed = data.get("installed", []) if isinstance(data, dict) else []
-        for app in installed:
-            if isinstance(app, dict):
-                path = app.get("install_path")
-                title = titles.get(str(app.get("appName"))) or (
-                    os.path.basename(os.path.normpath(path)) if path else None)
-                add(path, title, "GOG")
-
-    # Amazon, through nile.
-    if platform_enabled("Amazon Games"):
-        titles = _titles_from_library(
-            _read_json(os.path.join(root, "store_cache", "nile_library.json")), "library")
-        data = _read_json(os.path.join(root, "nile_config", "nile", "installed.json"))
-        for app in data if isinstance(data, list) else []:
-            if isinstance(app, dict):
-                path = app.get("path")
-                title = titles.get(str(app.get("id"))) or (
-                    os.path.basename(os.path.normpath(path)) if path else None)
-                add(path, title, "Amazon Games")
+        # Amazon, through nile.
+        if platform_enabled("Amazon Games"):
+            titles = _titles_from_library(
+                _read_json(os.path.join(root, "store_cache", "nile_library.json")), "library")
+            data = _read_json(os.path.join(root, "nile_config", "nile", "installed.json"))
+            for app in data if isinstance(data, list) else []:
+                if isinstance(app, dict):
+                    path = app.get("path")
+                    title = titles.get(str(app.get("id"))) or (
+                        os.path.basename(os.path.normpath(path)) if path else None)
+                    add(app.get("id"), path, title, "Amazon Games")
 
     # Longest path first, so a game installed inside another's folder wins.
     games.sort(key=lambda g: len(g[0]), reverse=True)
-    HEROIC_SCAN_INFO.update({"root": root, **counts})
-    debug_log(f"Heroic ({root}): {counts}")
+    HEROIC_BY_APP = by_app
+    HEROIC_SCAN_INFO.update({"root": ", ".join(roots), **counts})
+    if roots:
+        debug_log(f"Heroic ({', '.join(roots)}): {counts}")
     return games
 
 
@@ -613,9 +637,14 @@ def process_paths(info):
 
 
 def find_heroic_game(snapshot):
-    """(title, label) of a running game from a Heroic install folder."""
+    """(title, label) of a running Heroic game.
+
+    Matched first by install folder. If a game's path is not visible in its
+    process (some launchers hide it behind a wrapper), Heroic's own
+    HEROIC_APP_NAME and HEROIC_APP_SOURCE variables on the game are used.
+    """
     refresh_heroic_games()
-    if not HEROIC_GAMES:
+    if not HEROIC_GAMES and not HEROIC_BY_APP:
         return None
     for info in snapshot.values():
         if info["name"] in IGNORE_NAMES:
@@ -624,20 +653,66 @@ def find_heroic_game(snapshot):
             for install_dir, title, label in HEROIC_GAMES:
                 if path.startswith(install_dir) and platform_enabled(label):
                     return title, label
+    for pid, info in snapshot.items():
+        if info["name"] in IGNORE_NAMES:
+            continue
+        env = game_environ(pid, info)
+        app_name = env.get("HEROIC_APP_NAME")
+        if not app_name:
+            continue
+        known = HEROIC_BY_APP.get(app_name)
+        label = HEROIC_SOURCES.get((env.get("HEROIC_APP_SOURCE") or "").lower())
+        if known and (label is None or label == known[1]):
+            title, label = known
+        elif not label:
+            continue  # A sideloaded or unknown-source game: no store to report.
+        else:
+            title = app_name
+        if platform_enabled(label):
+            return title, label
     return None
 
 
+# --- PROCESS ENVIRONMENT ---
+# The variables launchers set on the games they start. Each process is read
+# once and cached by (pid, start time), so the cost is per new process, not per
+# poll, and the check works even after the launcher itself has closed.
+GAME_ENV_KEYS = ("GAME_NAME", "LUTRIS_GAME_UUID", "HEROIC_APP_NAME", "HEROIC_APP_SOURCE")
+_ENV_CACHE = {}
+
+
+def game_environ(pid, info):
+    key = (pid, info["created"])
+    cached = _ENV_CACHE.get(key)
+    if cached is None:
+        try:
+            env = psutil.Process(pid).environ()
+        except (psutil.Error, OSError):
+            env = {}
+        cached = {k: env[k] for k in GAME_ENV_KEYS if env.get(k)}
+        _ENV_CACHE[key] = cached
+    return cached
+
+
+def prune_env_cache(snapshot):
+    """Forget processes that have exited, so the cache cannot grow forever."""
+    live = {(pid, info["created"]) for pid, info in snapshot.items()}
+    for key in [k for k in _ENV_CACHE if k not in live]:
+        del _ENV_CACHE[key]
+
+
 # --- LUTRIS ---
-def _read_environ(pid):
-    try:
-        return psutil.Process(pid).environ()
-    except (psutil.Error, OSError):
-        return {}
+LUTRIS_WRAPPER_PREFIX = "lutris-wrapper: "
 
 
 def lutris_game_from_wrapper(cmdline):
-    """Older Lutris runs games through lutris-wrapper, whose first argument is
-    the game name: [python3] /usr/bin/lutris-wrapper "Game Name" ..."""
+    """The game name from Lutris's wrapper process, in either form:
+
+    - renamed by Lutris once the game is running: "lutris-wrapper: Game Name"
+    - as started: [python3] /usr/bin/lutris-wrapper "Game Name" ...
+    """
+    if cmdline and cmdline[0].startswith(LUTRIS_WRAPPER_PREFIX):
+        return cmdline[0][len(LUTRIS_WRAPPER_PREFIX):].strip() or None
     for i, arg in enumerate(cmdline):
         if os.path.basename(arg) == "lutris-wrapper" and i + 1 < len(cmdline):
             return cmdline[i + 1].strip() or None
@@ -645,19 +720,17 @@ def lutris_game_from_wrapper(cmdline):
 
 
 def find_lutris_game(snapshot):
-    """Current Lutris sets GAME_NAME and LUTRIS_GAME_UUID on the game's
-    environment. Reading environ is relatively costly, so only processes that
-    descend from Lutris are checked."""
-    lutris_pids = {pid for pid, info in snapshot.items() if info["name"] == "lutris"}
-    for pid, info in snapshot.items():
+    """From the wrapper's name, or else from GAME_NAME and LUTRIS_GAME_UUID,
+    which Lutris sets on the game. Neither needs the Lutris app to still be
+    open: closing it while playing used to drop the game after a few polls."""
+    for info in snapshot.values():
         title = lutris_game_from_wrapper(info["cmdline"])
         if title:
             return title
-        if not lutris_pids or info["name"] in IGNORE_NAMES:
+    for pid, info in snapshot.items():
+        if info["name"] in IGNORE_NAMES:
             continue
-        if not any(a in lutris_pids for a in ancestor_pids(pid, snapshot)):
-            continue
-        env = _read_environ(pid)
+        env = game_environ(pid, info)
         if env.get("LUTRIS_GAME_UUID") and env.get("GAME_NAME"):
             return env["GAME_NAME"].strip() or None
     return None
@@ -877,6 +950,7 @@ def resolve_sources(snapshot):
     diagnostics both walk this list, so the report never disagrees with what
     is published.
     """
+    prune_env_cache(snapshot)
     resolved = []
 
     def run(label, fn):
