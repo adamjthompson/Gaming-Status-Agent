@@ -8,6 +8,7 @@ gsa_debug.log.*
 gsa_diagnostics.txt
 gsa_ubi_ids.json
 "Gaming Status Agent.spec"
+GamingStatusAgent.spec
 
 # Local backups / scratch copies 
 *_backup.py

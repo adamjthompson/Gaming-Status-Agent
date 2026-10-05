@@ -40,7 +40,7 @@ A separate Linux version covers the following (see [Linux](#linux)):
  
 ## Install
 
-**From a release:** download `Gaming Status Agent.exe` from the
+**From a release:** download `GamingStatusAgent.exe` from the
 [Releases page](../../releases/latest), put it anywhere you like, and run it.
 It creates its config file next to itself, so a dedicated folder is tidiest.
 
@@ -426,10 +426,10 @@ To do it by hand instead, from a **Command Prompt** in the `windows` folder:
 
 ```
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name "Gaming Status Agent" --icon=..\assets\gsa_icon.ico --add-data "..\assets\gsa_icon.ico;." --version-file=version_info.txt gsa_tracker.py
+python -m PyInstaller --onefile --windowed --name GamingStatusAgent --icon=..\assets\gsa_icon.ico --add-data "..\assets\gsa_icon.ico;." --version-file=version_info.txt gsa_tracker.py
 ```
 
-The result is `windows\dist\Gaming Status Agent.exe`. Copy it somewhere of its own — it writes
+The result is `windows\dist\GamingStatusAgent.exe`. Copy it somewhere of its own — it writes
 `gsa_config.json` and `gsa_debug.log` next to itself.
 
 `python -m PyInstaller` rather than a bare `pyinstaller` on purpose: pip puts
@@ -444,7 +444,7 @@ PyInstaller's source/destination separator, and PowerShell will otherwise treat
 it as a command separator:
 
 ```
-python -m PyInstaller --onefile --windowed --name "Gaming Status Agent" --icon=..\assets\gsa_icon.ico --add-data '..\assets\gsa_icon.ico;.' --version-file=version_info.txt gsa_tracker.py
+python -m PyInstaller --onefile --windowed --name GamingStatusAgent --icon=..\assets\gsa_icon.ico --add-data '..\assets\gsa_icon.ico;.' --version-file=version_info.txt gsa_tracker.py
 ```
 
 What each flag is for:
@@ -453,10 +453,10 @@ What each flag is for:
 |---|---|
 | `--onefile` | One self-contained exe rather than a folder |
 | `--windowed` | No console window behind the tray icon |
-| `--name "Gaming Status Agent"` | Produces `Gaming Status Agent.exe` instead of `gsa_tracker.exe` |
+| `--name GamingStatusAgent` | Produces `GamingStatusAgent.exe` instead of `gsa_tracker.exe`. No spaces, because GitHub turns spaces in release file names into dots; Windows still shows "Gaming Status Agent" from the version details |
 | `--icon=` | The icon Explorer and the taskbar show for the exe itself |
 | `--add-data` | Bundles the .ico *inside* the exe, so the tray and windows can load it at runtime |
-| `--version-file=` | Embeds the name and version, so Windows shows "Gaming Status Agent" not "Gaming Status Agent.exe" |
+| `--version-file=` | Embeds the name and version, so Windows shows "Gaming Status Agent" not "GamingStatusAgent.exe" |
 
 Both icon flags are needed: `--icon` brands the executable, `--add-data` makes
 the file readable at runtime through `resource_path()`. Omit the second and the
@@ -471,7 +471,7 @@ is what Task Manager, Startup Apps and Properties → Details display; drop the
 flag and they all fall back to the filename. Keep its version numbers in step
 with `GSA_VERSION` in `windows/gsa_tracker.py`, which the diagnostics report prints.
 
-`build\`, `dist\` and `Gaming Status Agent.spec` are build artifacts and are gitignored.
+`build\`, `dist\` and `GamingStatusAgent.spec` are build artifacts and are gitignored.
 
 `windows/gsa_diagnose.py` is a command-line front end for the same diagnostics report
 (`python gsa_diagnose.py > report.txt`). It's a development convenience and is

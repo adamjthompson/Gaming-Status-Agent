@@ -1,4 +1,4 @@
-# Builds Gaming Status Agent.exe on Windows and attaches it, plus a Linux
+# Builds GamingStatusAgent.exe on Windows and attaches it, plus a Linux
 # archive, to the GitHub Release for the tag. Releases are numbered by date
 # (2026.10.1 = first release of October 2026); each agent keeps its own app
 # version in GSA_VERSION. Runs when such a tag is pushed, including one created
@@ -64,7 +64,7 @@ jobs:
         run: |
           python make_version_info.py
           python -m PyInstaller --noconfirm --clean --onefile --windowed `
-            --name "Gaming Status Agent" `
+            --name GamingStatusAgent `
             --icon=../assets/gsa_icon.ico `
             --add-data '../assets/gsa_icon.ico;.' `
             --version-file=version_info.txt `
@@ -78,7 +78,7 @@ jobs:
 
       - name: Publish release
         run: |
-          $files = @("windows/dist/Gaming Status Agent.exe", "gaming-status-agent-linux-$env:LINUX_VERSION.zip")
+          $files = @("windows/dist/GamingStatusAgent.exe", "gaming-status-agent-linux-$env:LINUX_VERSION.zip")
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
             # Created from the Releases page: add the builds, keep its notes.

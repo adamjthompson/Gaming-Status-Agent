@@ -24,8 +24,8 @@ from PIL import Image, ImageDraw
 import psutil
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
-# exe so Windows shows "Gaming Status Agent" rather than "Gaming Status Agent.exe".
-GSA_VERSION = "1.3.1"
+# exe so Windows shows "Gaming Status Agent" rather than "GamingStatusAgent.exe".
+GSA_VERSION = "1.3.2"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -3303,6 +3303,26 @@ def set_startup(enabled):
         debug_log(f"Could not change start at login: {e}")
 
 
+def repair_startup_entry():
+    """Point an existing Start at login entry at this copy of the app.
+
+    The entry stores the exe's full path. Renaming, moving or replacing the exe
+    after turning it on left Windows starting a file that no longer exists, at
+    every login and without a word, while the tray still showed it as on. Run
+    once at launch, so opening the app by hand after a move fixes it. An entry
+    that is off is left off.
+    """
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_REG_PATH) as key:
+            current, _ = winreg.QueryValueEx(key, RUN_VALUE_NAME)
+    except OSError:
+        return
+    expected = startup_command()
+    if str(current).strip().lower() != expected.lower():
+        debug_log(f"Start at login pointed at {current}; updating it to {expected}.")
+        set_startup(True)
+
+
 def toggle_startup(icon, item):
     set_startup(not startup_enabled())
 
@@ -3645,6 +3665,7 @@ def main():
     debug_log(f"=== GAMING STATUS AGENT {GSA_VERSION} LAUNCHED ===")
     apply_window_icon()
     check_initial_config()
+    repair_startup_entry()
     start_services()
     icon = pystray.Icon("Gaming Status Agent", create_image(), "Gaming Status Agent", create_tray_menu())
 

@@ -1,7 +1,7 @@
 @echo off
 setlocal
  
-rem Build Gaming Status Agent.exe. Safe to double-click from Explorer.
+rem Build GamingStatusAgent.exe. Safe to double-click from Explorer.
 
 rem Explorer starts batch files in C:\Windows\System32, so move to this file's
 rem own folder or every relative path below resolves against the wrong place.
@@ -41,7 +41,7 @@ if not exist "..\assets\gsa_icon.ico" (
 
 rem Regenerate the Windows version resource from GSA_VERSION so the exe
 rem metadata can never drift from what the app reports. Without it, Task
-rem Manager and Startup Apps fall back to showing "Gaming Status Agent.exe".
+rem Manager and Startup Apps fall back to showing "GamingStatusAgent.exe".
 set "VERFLAG="
 if exist "make_version_info.py" (
     %PY% make_version_info.py
@@ -54,7 +54,7 @@ if exist "version_info.txt" (
     set "VERFLAG=--version-file=version_info.txt"
 ) else (
     echo WARNING: version_info.txt not found. The exe will appear as
-    echo          "Gaming Status Agent.exe" rather than "Gaming Status Agent" in Task Manager.
+    echo          "GamingStatusAgent.exe" rather than "Gaming Status Agent" in Task Manager.
 )
 
 %PY% -m PyInstaller --version >nul 2>&1
@@ -74,7 +74,7 @@ echo.
 %PY% -m PyInstaller --noconfirm --clean ^
     --onefile ^
     --windowed ^
-    --name "Gaming Status Agent" ^
+    --name GamingStatusAgent ^
     --icon=..\assets\gsa_icon.ico ^
     --add-data "..\assets\gsa_icon.ico;." ^
     %VERFLAG% ^
@@ -86,14 +86,14 @@ if errorlevel 1 (
     echo  BUILD FAILED - see the output above.
     echo ============================================
     echo.
-    echo If it could not write dist\Gaming Status Agent.exe, quit Gaming Status Agent from its
+    echo If it could not write dist\GamingStatusAgent.exe, quit Gaming Status Agent from its
     echo tray icon first: a running exe cannot be overwritten.
     goto :end
 )
 
 echo.
 echo ============================================
-echo  Done: %CD%\dist\Gaming Status Agent.exe
+echo  Done: %CD%\dist\GamingStatusAgent.exe
 echo ============================================
 echo.
 echo Copy it to a folder of its own - it writes gsa_config.json
