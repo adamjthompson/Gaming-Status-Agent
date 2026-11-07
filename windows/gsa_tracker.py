@@ -3284,7 +3284,7 @@ def _add_platform_checks(win, row, notes=None):
     var = tk.BooleanVar(value=bool(CONFIG.get("UBISOFT_ACHIEVEMENTS", True)))
     vars_dict[UBISOFT_ACHIEVEMENTS_OPTION] = var
     tk.Checkbutton(win, text="Send Ubisoft achievements and library to Home Assistant "
-                             "(read from Ubisoft Connect; Ubisoft must be ticked)",
+                             "(Ubisoft Connect must be enabled)",
                    variable=var).grid(row=row, column=0, columnspan=2, padx=15,
                                       pady=(6, 0), sticky="w")
     row += 1
