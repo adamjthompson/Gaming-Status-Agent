@@ -566,6 +566,16 @@ Anyone sending a bug report will be quoting that version back to you: the
 diagnostics report is headed `Gaming Status Agent 1.1.0 diagnostics`, and `gsa_debug.log`
 opens each run with `=== GAMING STATUS AGENT 1.1.0 LAUNCHED ===`.
 
+## Credits
+
+- **[UbiSlot](https://github.com/BalTor02/UbiSlot)** by Balkrishna Toraskar
+  (BalTor02), MIT License: the Ubisoft Connect ownership, achievement and unlock
+  file parsing behind [Ubisoft achievements and library](#ubisoft-achievements-and-library)
+  is ported from it. UbiSlot's license notice is included in
+  `windows/gsa_ubisoft.py`.
+- **PSerban93**, credited by UbiSlot for the original Ubisoft achievement-data
+  extraction technique.
+
 ## Contributing
 
 Ubisoft game ids are the most useful contribution: if you hit an

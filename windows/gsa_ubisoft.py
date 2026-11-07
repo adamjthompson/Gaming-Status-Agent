@@ -19,9 +19,34 @@ Ubisoft keeps this data only on the PC (there is no public profile to query):
 
 Copies of one game bought from different stores (e.g. "Skull and Bones" and
 "Skull and Bones (Steam)") have separate IDs but the same achievements; they
-are merged into one library entry. The format was worked out by the community
-(see UbiSlot by BalTor02, MIT) and isn't documented by Ubisoft, so every
-parser tolerates junk and returns what it could read.
+are merged into one library entry. The format isn't documented by Ubisoft, so
+every parser tolerates junk and returns what it could read.
+
+The ownership, achievement-archive and spool parsing is ported from UbiSlot
+(https://github.com/BalTor02/UbiSlot), whose author credits PSerban93 for the
+original achievement-data extraction technique. UbiSlot's license:
+
+    MIT License
+
+    Copyright (c) 2026  Balkrishna Toraskar
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
 
 Standard library only, and no Windows-only imports, so it can be tested off
 Windows against sample files.
