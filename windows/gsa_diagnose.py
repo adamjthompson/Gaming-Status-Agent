@@ -42,9 +42,18 @@ def main():
     # registry scan behind it fills the counts the report prints.
     if gsa.platform_enabled("Ubisoft"):
         try:
-            gsa.get_ubisoft_info()
+            _, ubi_names = gsa.get_ubisoft_info()
         except Exception as e:
+            ubi_names = {}
             print(f"(Ubisoft catalog/registry scan failed: {e})")
+        # Read-only pass over Ubisoft Connect's achievement cache, for the
+        # report's Ubisoft achievements section. Nothing is published.
+        if gsa.ubisoft_reporting_enabled():
+            try:
+                gsa.scan_ubisoft_library(ubi_names, gsa.get_ubisoft_install_dir())
+                gsa.UBISOFT_ACH_INFO["status"] = "scanned by gsa_diagnose (not running)"
+            except Exception as e:
+                print(f"(Ubisoft achievements scan failed: {e})")
 
     report = gsa.build_diagnostic_report()
     try:

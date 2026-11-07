@@ -22,15 +22,18 @@ from watchdog.events import FileSystemEventHandler
 import pystray
 from PIL import Image, ImageDraw
 import psutil
+
+import gsa_ubisoft
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "GamingStatusAgent.exe".
-GSA_VERSION = "1.3.2"
+GSA_VERSION = "1.4.0"
 
 # --- GLOBALS & PATHS ---
 client = None
 observer = None
 custom_tracker = None
+ubisoft_reporter = None
 CONFIG = {}
 PROFILE_SANITIZED = "user"
 
@@ -54,7 +57,11 @@ OPEN_WINDOWS = {}
 _WINDOW_ICON = None
 
 # Epic games currently believed to be running, keyed by Epic AppName:
-#   {"title": str, "exe": str, "launched_at": float, "seen_running": bool}
+#   {"title": str, "exe": str, "namespace": str, "launched_at": float,
+#    "seen_running": bool}
+# namespace is the manifest's CatalogNamespace, which is the sandbox ID Epic's
+# achievement data is keyed by; it is published as "Epic Sandbox ID" so Gaming
+# Status can find the game's achievements exactly, even before the first unlock.
 # Epic's log reliably announces launches but not exits, so liveness is confirmed
 # by the poller instead. More than one game can be running at a time.
 EPIC_LOCK = threading.RLock()
@@ -117,6 +124,14 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "gsa_config.json")
 DEBUG_LOG_FILE = os.path.join(BASE_DIR, "gsa_debug.log")
 UBI_CACHE_FILE = os.path.join(BASE_DIR, "gsa_ubi_ids.json")
+# Ubisoft achievement icons already sent to Home Assistant, per topic, so a
+# restart doesn't resend them (they're retained on the broker). Delete this
+# file to resend every icon.
+UBI_ICONS_FILE = os.path.join(BASE_DIR, "gsa_ubi_icons.json")
+# Filled by the Ubisoft achievements scan, for diagnostics.
+UBISOFT_ACH_INFO = {"paths": {}, "owned": 0, "games": [], "spool_files": 0,
+                    "errors": [], "last_scan": "", "last_publish": "",
+                    "icons_sent": 0, "status": "not started"}
 LOCAL_APPDATA = os.environ.get('LOCALAPPDATA', '')
 PROGRAM_DATA = os.environ.get('PROGRAMDATA', '')
 
@@ -220,7 +235,10 @@ DEFAULT_CONFIG = {
     "POLL_INTERVAL": 5,
     "CATALOG_URL": DEFAULT_CATALOG_URL,
     "CUSTOM_GAMES": [],
-    "UBISOFT_OVERRIDES": {}
+    "UBISOFT_OVERRIDES": {},
+    # Send Ubisoft achievements and library (read from Ubisoft Connect's local
+    # cache) to Home Assistant. Only applies while Ubisoft is tracked.
+    "UBISOFT_ACHIEVEMENTS": True
 }
 
 # A launcher gets its own profile name only where the service has a distinct
@@ -640,7 +658,7 @@ def load_config():
 
     # A hand-edited config can carry "false" or 0 here; bool("false") is True,
     # so the string forms are resolved before coercing.
-    for enable_key in PLATFORM_ENABLE_KEYS.values():
+    for enable_key in (*PLATFORM_ENABLE_KEYS.values(), "UBISOFT_ACHIEVEMENTS"):
         raw = merged.get(enable_key, DEFAULT_CONFIG[enable_key])
         if isinstance(raw, str):
             raw = raw.strip().lower() not in ("", "0", "false", "no", "off")
@@ -694,8 +712,9 @@ def save_config(config=None):
 
 
 def get_epic_mapping():
-    """Map Epic AppName -> {title, exe}. The executable comes from the manifest's
-    LaunchExecutable and is what lets the poller tell when a game has exited."""
+    """Map Epic AppName -> {title, exe, namespace}. The executable comes from the
+    manifest's LaunchExecutable and is what lets the poller tell when a game has
+    exited; namespace (CatalogNamespace) identifies its Epic achievements."""
     mapping = {}
     if not os.path.exists(EPIC_MANIFEST_DIR):
         return mapping
@@ -713,7 +732,8 @@ def get_epic_mapping():
                     launch_exe = data.get("LaunchExecutable", "") or ""
                     mapping[data["AppName"]] = {
                         "title": data["DisplayName"],
-                        "exe": os.path.basename(launch_exe.replace("\\", "/")).lower()
+                        "exe": os.path.basename(launch_exe.replace("\\", "/")).lower(),
+                        "namespace": str(data.get("CatalogNamespace") or "").strip()
                     }
             except Exception:
                 pass
@@ -1288,15 +1308,22 @@ CATALOG_MAX_AGE_SECONDS = 6 * 3600
 _CATALOG_CACHE = {"url": None, "mapping": None, "fetched": 0.0}
 
 
-def get_ubisoft_info():
-    mapping = {}
-    log_dir = r"C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\logs"
+def get_ubisoft_install_dir():
+    """Ubisoft Connect's install folder (it also holds a cache), from the
+    registry, else the default location."""
     try:
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Ubisoft\Launcher") as key:
             install_dir, _ = winreg.QueryValueEx(key, "InstallDir")
-            log_dir = os.path.join(install_dir, "logs")
+            if install_dir:
+                return install_dir
     except Exception:
         pass
+    return r"C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher"
+
+
+def get_ubisoft_info():
+    mapping = {}
+    log_dir = os.path.join(get_ubisoft_install_dir(), "logs")
 
     # 1. Fetch Latest Community Database
     catalog_url = CONFIG.get("CATALOG_URL") or DEFAULT_CATALOG_URL
@@ -1511,11 +1538,27 @@ def publish_global_state(status, game_title, launcher_name, wait=False):
             "Start Time": start_time,
             "End Time": end_time,
             "Machine": MACHINE_NAME,
-            "OS": "Windows"
+            "OS": "Windows",
+            "Epic Sandbox ID": epic_sandbox_id(GLOBAL_STATE["launcher"], game_title),
+            "Ubisoft Game ID": ubisoft_game_id(GLOBAL_STATE["launcher"]),
+            "Ubisoft Topic": ubisoft_topic_field()
         }
 
     debug_log(f"Attempting to publish via MQTT: {game_title} on {launcher_name}")
     _publish_payload(payload, wait=wait)
+
+
+def _publish_raw(topic, data):
+    """Publish a retained message (bytes or str) on any topic. Returns True
+    once it's handed to a connected client, so callers can retry later."""
+    if not client:
+        return False
+    try:
+        info = client.publish(topic, data, qos=1, retain=True)
+        return info.rc == mqtt.MQTT_ERR_SUCCESS
+    except Exception as e:
+        debug_log(f"MQTT publish to {topic} failed: {e}")
+        return False
 
 
 def _offline_payload():
@@ -1526,7 +1569,10 @@ def _offline_payload():
         "Start Time": "None",
         "End Time": "None",
         "Machine": MACHINE_NAME,
-        "OS": "Windows"
+        "OS": "Windows",
+        "Epic Sandbox ID": "None",
+        "Ubisoft Game ID": "None",
+        "Ubisoft Topic": ubisoft_topic_field()
     }
 
 
@@ -1564,6 +1610,44 @@ def _on_publish(mqtt_client, userdata, mid, *args):
     debug_log(f"MQTT publish delivered (message {mid}).")
 
 
+def epic_sandbox_id(launcher, game_title):
+    """The "Epic Sandbox ID" payload value: the running Epic game's
+    CatalogNamespace when the published game is an Epic one, else "None" (the
+    payload's usual placeholder, which Gaming Status ignores)."""
+    if launcher != "Epic":
+        return "None"
+    with EPIC_LOCK:
+        matches = [i for i in EPIC_GAMES.values()
+                   if i["title"] == game_title and i.get("namespace")]
+        if not matches:
+            return "None"
+        return max(matches, key=lambda i: i["launched_at"])["namespace"]
+
+
+def ubisoft_reporting_enabled():
+    return platform_enabled("Ubisoft") and bool(CONFIG.get("UBISOFT_ACHIEVEMENTS", True))
+
+
+def ubisoft_topic_base():
+    return f"gaming_status_agent/{PROFILE_SANITIZED}/ubisoft"
+
+
+def ubisoft_topic_field():
+    """The "Ubisoft Topic" payload value: where the Ubisoft library and icons
+    are published, or "None" when that's switched off. Sent in every payload,
+    offline too, so Gaming Status can show the library while not playing."""
+    return ubisoft_topic_base() if ubisoft_reporting_enabled() else "None"
+
+
+def ubisoft_game_id(launcher):
+    """The "Ubisoft Game ID" payload value: the running Ubisoft game's ID when
+    the published game is a Ubisoft one, else "None"."""
+    if launcher != "Ubisoft":
+        return "None"
+    with UBISOFT_LOCK:
+        return UBISOFT_GAME["id"] if UBISOFT_GAME else "None"
+
+
 def epic_active_title():
     """The most recently launched Epic game still believed to be running."""
     with EPIC_LOCK:
@@ -1573,11 +1657,12 @@ def epic_active_title():
         return newest["title"]
 
 
-def register_epic_launch(app_id, title, exe):
+def register_epic_launch(app_id, title, exe, namespace=""):
     with EPIC_LOCK:
         EPIC_GAMES[app_id] = {
             "title": title,
             "exe": exe,
+            "namespace": namespace,
             "launched_at": time.monotonic(),
             "seen_exe": False,
             "seen_running": False
@@ -1645,7 +1730,10 @@ def republish_current_state():
         "Start Time": state["start_time"],
         "End Time": "None",
         "Machine": MACHINE_NAME,
-        "OS": "Windows"
+        "OS": "Windows",
+        "Epic Sandbox ID": epic_sandbox_id(state["launcher"], state["game"]),
+        "Ubisoft Game ID": ubisoft_game_id(state["launcher"]),
+        "Ubisoft Topic": ubisoft_topic_field()
     }
     _publish_payload(payload)
 
@@ -1730,7 +1818,7 @@ class GameLogHandler(FileSystemEventHandler):
             entry = self.games_mapping.get(app_id, {})
             title = entry.get("title") or "Unknown Epic Game"
             exe = entry.get("exe", "")
-            register_epic_launch(app_id, title, exe)
+            register_epic_launch(app_id, title, exe, entry.get("namespace", ""))
             if not exe:
                 debug_log(f"No launch executable in the Epic manifest for {title}; "
                           f"falling back to window ancestry to detect its exit.")
@@ -1784,6 +1872,142 @@ class GameLogHandler(FileSystemEventHandler):
             debug_log("Ubisoft Launcher detected game close")
             set_ubisoft_game(None)
             self.current_game_id = None
+            if ubisoft_reporter:
+                ubisoft_reporter.mark_dirty()
+
+
+# --- UBISOFT ACHIEVEMENTS & LIBRARY ---
+def scan_ubisoft_library(names, install_dir):
+    """One read-only pass over Ubisoft Connect's cache. Returns (library,
+    icons) -- see gsa_ubisoft.build_library -- and refreshes UBISOFT_ACH_INFO.
+    Also used by gsa_diagnose.py."""
+    paths = gsa_ubisoft.find_paths(LOCAL_APPDATA, PROGRAM_DATA, install_dir)
+    errors = []
+    owned = gsa_ubisoft.read_owned_ids(paths)
+    defs = gsa_ubisoft.read_definitions(paths)
+    unlocks = gsa_ubisoft.read_unlocks(paths, errors)
+    config_names = gsa_ubisoft.read_config_names(paths)
+    library, icons = gsa_ubisoft.build_library(names, owned, defs, unlocks, config_names)
+    UBISOFT_ACH_INFO.update({
+        "paths": {k: len(v) for k, v in paths.items()},
+        "owned": library["owned_game_count"],
+        "games": [(g["title"], g["variants"], g["achievements_earned"],
+                   g["achievements_total"], g["last_unlock"]) for g in library["games"]],
+        "spool_files": sum(len(v) for v in gsa_ubisoft.spool_files(paths).values()),
+        "errors": errors[:10],
+        "last_scan": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    return library, icons
+
+
+def _load_sent_icons():
+    try:
+        with open(UBI_ICONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {str(k): set(v) for k, v in data.items() if isinstance(v, list)}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _save_sent_icons(sent):
+    try:
+        tmp = UBI_ICONS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({k: sorted(v) for k, v in sent.items()}, f)
+        os.replace(tmp, UBI_ICONS_FILE)
+    except OSError as e:
+        debug_log(f"Could not save the sent Ubisoft icons list: {e}")
+
+
+class UbisoftReporter(threading.Thread):
+    """Publishes the Ubisoft library (and icons for recent unlocks) to Home
+    Assistant. Rescans when a spool file changes (an achievement unlocked),
+    when a Ubisoft game closes, on reconnect, and every 30 minutes. Reading
+    the cache is quick (a few small files), so every pass is a full scan."""
+
+    FULL_SCAN_SECONDS = 1800
+    DEBOUNCE_SECONDS = 3
+
+    def __init__(self, names, install_dir):
+        super().__init__(daemon=True, name="UbisoftReporter")
+        self.names = dict(names)
+        self.install_dir = install_dir
+        self.base = ubisoft_topic_base()
+        self.stop_event = threading.Event()
+        self.wake = threading.Event()
+        self.force_publish = False
+        self.last_body = None
+        self.sent = _load_sent_icons()
+
+    def mark_dirty(self):
+        self.wake.set()
+
+    def request_publish(self):
+        """Resend the library even if unchanged (after a reconnect)."""
+        self.force_publish = True
+        self.wake.set()
+
+    def stop(self):
+        self.stop_event.set()
+        self.wake.set()
+
+    def run(self):
+        UBISOFT_ACH_INFO["status"] = "running"
+        while not self.stop_event.is_set():
+            try:
+                self.scan_and_publish()
+            except Exception as e:
+                UBISOFT_ACH_INFO["status"] = f"scan failed: {e}"
+                debug_log(f"Ubisoft achievements scan failed: {e}")
+            self.wake.wait(self.FULL_SCAN_SECONDS)
+            if self.stop_event.is_set():
+                break
+            if self.wake.is_set():
+                self.wake.clear()
+                # Let Ubisoft Connect finish writing before reading.
+                self.stop_event.wait(self.DEBOUNCE_SECONDS)
+        UBISOFT_ACH_INFO["status"] = "stopped"
+
+    def scan_and_publish(self):
+        library, icons = scan_ubisoft_library(self.names, self.install_dir)
+        if self.stop_event.is_set():
+            return
+        # Icons first, so Home Assistant has them by the time the unlock
+        # they belong to arrives.
+        sent = self.sent.setdefault(self.base, set())
+        new_icons = 0
+        for game_id, ach_id, archive in icons:
+            key = f"{game_id}/{ach_id}"
+            if key in sent or self.stop_event.is_set():
+                continue
+            data = gsa_ubisoft.read_icon(archive, ach_id)
+            if data and _publish_raw(f"{self.base}/icon/{game_id}/{ach_id}", data):
+                sent.add(key)
+                new_icons += 1
+        if new_icons:
+            _save_sent_icons(self.sent)
+            UBISOFT_ACH_INFO["icons_sent"] = len(sent)
+
+        body = json.dumps(library, sort_keys=True)
+        if body != self.last_body or self.force_publish:
+            if _publish_raw(f"{self.base}/library", body):
+                self.last_body = body
+                self.force_publish = False
+                UBISOFT_ACH_INFO["last_publish"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                debug_log(f"Published Ubisoft library: {len(library['games'])} games, "
+                          f"{new_icons} new icons")
+
+
+class UbisoftSpoolHandler(FileSystemEventHandler):
+    """Wakes the reporter when a .spool file changes -- Ubisoft Connect
+    rewrites a game's spool the moment an achievement unlocks."""
+
+    def __init__(self, reporter):
+        self.reporter = reporter
+
+    def on_any_event(self, event):
+        if not event.is_directory and str(event.src_path).lower().endswith(".spool"):
+            self.reporter.mark_dirty()
 
 
 # --- UNIVERSAL PROCESS ANCESTRY TRACKER ---
@@ -2393,6 +2617,27 @@ def build_diagnostic_report():
     for title, exe, seen in epic_tracked:
         out.append(f"      {title}  (exe: {exe or 'unknown'}, process seen: {seen})")
 
+    section("UBISOFT ACHIEVEMENTS & LIBRARY")
+    if not ubisoft_reporting_enabled():
+        out.append("  Off (Ubisoft not tracked, or sending achievements is switched off).")
+    else:
+        info = UBISOFT_ACH_INFO
+        out.append(f"  Reporter         : {info.get('status')}")
+        out.append(f"  MQTT topics      : {ubisoft_topic_base()}/library, .../icon/<game>/<achievement>")
+        out.append(f"  Cache folders    : {info.get('paths') or 'not scanned yet'}")
+        out.append(f"  Owned games      : {info.get('owned', 0)}")
+        out.append(f"  Spool files      : {info.get('spool_files', 0)}")
+        out.append(f"  Last scan        : {info.get('last_scan') or 'never'}")
+        out.append(f"  Last publish     : {info.get('last_publish') or 'never'}")
+        out.append(f"  Icons sent       : {info.get('icons_sent', 0)}")
+        games = info.get("games") or []
+        out.append(f"  Games with achievements: {len(games)}")
+        for title, variants, earned, total, last in games:
+            out.append(f"      {title}  {earned}/{total if total is not None else '?'}  "
+                       f"(IDs {', '.join(map(str, variants))}; last unlock {last or 'none'})")
+        for err in info.get("errors") or []:
+            out.append(f"  ! {err}")
+
     windows = get_active_window_titles()
     snapshot, processes, running_exes = snapshot_processes()
 
@@ -2590,6 +2835,8 @@ def _on_connect(mqtt_client, userdata, *args):
         try:
             setup_mqtt_discovery(mqtt_client)
             republish_current_state()
+            if ubisoft_reporter:
+                ubisoft_reporter.request_publish()
         except Exception as e:
             debug_log(f"Post-connect publish failed: {e}")
     else:
@@ -2605,8 +2852,13 @@ def _on_disconnect(mqtt_client, userdata, *args):
 
 
 def stop_services():
-    global client, observer, custom_tracker
+    global client, observer, custom_tracker, ubisoft_reporter
     debug_log("Stopping all background services...")
+
+    if ubisoft_reporter:
+        ubisoft_reporter.stop()
+        ubisoft_reporter.join(timeout=2)
+        ubisoft_reporter = None
 
     if custom_tracker:
         custom_tracker.stop()
@@ -2665,7 +2917,8 @@ MQTT_SETUP_ERROR = ""
 
 
 def start_services():
-    global client, observer, custom_tracker, CONFIG, PROFILE_SANITIZED, MQTT_SETUP_ERROR
+    global client, observer, custom_tracker, ubisoft_reporter
+    global CONFIG, PROFILE_SANITIZED, MQTT_SETUP_ERROR
     global GOG_BY_PATH, GOG_BY_NAME, BATTLENET_BY_DIR
     global STEAM_BY_DIR, STEAM_BY_APPID, XBOX_BY_DIR
     debug_log("Starting Gaming Status Agent services...")
@@ -2733,6 +2986,17 @@ def start_services():
             observer.schedule(ubi_handler, path=ubi_log_dir, recursive=False)
             debug_log(f"Monitoring Ubisoft Logs at: {ubi_log_dir}")
 
+        if ubisoft_reporting_enabled():
+            install_dir = get_ubisoft_install_dir()
+            ubisoft_reporter = UbisoftReporter(ubi_mapping, install_dir)
+            spool_handler = UbisoftSpoolHandler(ubisoft_reporter)
+            for spool_dir in gsa_ubisoft.find_paths(LOCAL_APPDATA, PROGRAM_DATA, install_dir)["spool"]:
+                try:
+                    observer.schedule(spool_handler, path=spool_dir, recursive=True)
+                    debug_log(f"Watching Ubisoft achievements at: {spool_dir}")
+                except Exception as e:
+                    debug_log(f"Could not watch {spool_dir}: {e}")
+
     try:
         observer.start()
     except Exception as e:
@@ -2751,6 +3015,10 @@ def start_services():
     custom_tracker.daemon = True
     custom_tracker.start()
     debug_log("Universal Game Poller started successfully")
+
+    if ubisoft_reporter:
+        ubisoft_reporter.start()
+        debug_log("Ubisoft achievements reporter started")
 
 
 # Serialises restarts. Two quick saves must not interleave stop and start.
@@ -3012,12 +3280,26 @@ def _add_platform_checks(win, row, notes=None):
         tk.Checkbutton(win, text=text, variable=var).grid(
             row=row, column=0, columnspan=2, padx=15, sticky="w")
         row += 1
+    # Not a platform: an option of Ubisoft's, shown just after the list.
+    var = tk.BooleanVar(value=bool(CONFIG.get("UBISOFT_ACHIEVEMENTS", True)))
+    vars_dict[UBISOFT_ACHIEVEMENTS_OPTION] = var
+    tk.Checkbutton(win, text="Send Ubisoft achievements and library to Home Assistant "
+                             "(read from Ubisoft Connect; Ubisoft must be ticked)",
+                   variable=var).grid(row=row, column=0, columnspan=2, padx=15,
+                                      pady=(6, 0), sticky="w")
+    row += 1
     return vars_dict, row
+
+
+UBISOFT_ACHIEVEMENTS_OPTION = "UBISOFT_ACHIEVEMENTS"
 
 
 def _apply_platform_values(vars_dict):
     for label, var in vars_dict.items():
-        CONFIG[PLATFORM_ENABLE_KEYS[label]] = bool(var.get())
+        if label == UBISOFT_ACHIEVEMENTS_OPTION:
+            CONFIG["UBISOFT_ACHIEVEMENTS"] = bool(var.get())
+        else:
+            CONFIG[PLATFORM_ENABLE_KEYS[label]] = bool(var.get())
 
 
 def show_platforms_ui():

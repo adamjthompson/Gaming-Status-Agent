@@ -100,6 +100,9 @@ title. Attributes:
 | `End Time` | Set when a session ends |
 | `Machine` | The computer's name, e.g. `GAMING-PC` |
 | `OS` | `Windows` or `Linux` |
+| `Epic Sandbox ID` | *(Windows)* The running Epic game's catalog ID, e.g. `9773aa1aa54f4f7b80e44bef04986cea`, or `None`. Gaming Status uses it to find the game's Epic achievements exactly |
+| `Ubisoft Game ID` | *(Windows)* The running Ubisoft game's ID, e.g. `1713`, or `None` |
+| `Ubisoft Topic` | *(Windows)* Where the Ubisoft achievements and library are published (see [Ubisoft achievements](#ubisoft-achievements-and-library)), or `None` when that's switched off |
 
 If the PC loses power or drops off the network, the broker publishes `Offline`
 on Gaming Status Agent's behalf via its Last Will, so the sensor never sticks on a game you
@@ -217,6 +220,35 @@ and the game can't be attributed to it.
 
 ---
 
+## Ubisoft achievements and library
+
+Ubisoft keeps achievement data only on your PC, so Gaming Status Agent reads it
+from Ubisoft Connect's local cache and sends it to Home Assistant, where Gaming
+Status shows it as a Ubisoft library, live achievements while you play, and
+unlock notifications with the real achievement icons. It's on whenever Ubisoft is
+tracked; untick **Send Ubisoft achievements and library to Home Assistant** under
+**Platforms** to turn it off.
+
+- **Read-only.** It reads the ownership, achievement and unlock files in
+  `%LOCALAPPDATA%\Ubisoft Game Launcher`, `%ProgramData%\Ubisoft\Ubisoft Game Launcher`
+  and the launcher's install folder. It never writes to, moves or locks them.
+- **What's sent**, retained, to your broker only:
+  `gaming_status_agent/<device>/ubisoft/library` (every game with achievements:
+  title, unlocked/total, and its 10 most recent unlocks) and
+  `.../ubisoft/icon/<game>/<achievement>` (the icon of each of those recent
+  unlocks, sent once).
+- **When.** At startup, within a few seconds of an achievement unlocking (the
+  launcher rewrites a game's unlock file at that moment), when a Ubisoft game
+  closes, after reconnecting, and every 30 minutes.
+- **Copies from other stores** (e.g. a game's Steam copy, which has its own ID
+  and its own unlock file) are merged into one game, counting every achievement
+  unlocked in any copy.
+- **Only games played on this PC** have achievement files, so games played
+  elsewhere don't show up until they're played here.
+
+The icons already sent are listed in `gsa_ubi_icons.json`; delete it to send them
+all again (for example after clearing the broker).
+
 ## Configuration
 
 Most settings live in the tray menu. `gsa_config.json` holds a few extra keys
@@ -244,6 +276,7 @@ here because they're handy to set when deploying the same config to several PCs:
 | `ENABLE_MINECRAFT` | `false` |
 | `ENABLE_ROBLOX` | `false` |
 | `ENABLE_ROCKSTAR` | `false` |
+| `UBISOFT_ACHIEVEMENTS` | `true` — send [Ubisoft achievements and library](#ubisoft-achievements-and-library) to Home Assistant |
 
 A switched-off platform is skipped completely — its registry and manifest scans
 never run at startup, and the poller doesn't check it each tick. Turning off
@@ -337,7 +370,12 @@ gsa_config.json      broker, username, encrypted password, gamertags
 gsa_debug.log        what you played and when
 gsa_diagnostics.txt  broker address, window titles, process list
 gsa_ubi_ids.json     cached game-name catalog
+gsa_ubi_icons.json   Ubisoft achievement icons already sent to the broker
 ```
+
+With Ubisoft achievements on, your Ubisoft game list and achievement unlocks
+(names, descriptions, unlock times and icons) are published to your broker.
+They never leave your network.
 
 ## Linux
 

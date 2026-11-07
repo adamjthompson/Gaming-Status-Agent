@@ -41,3 +41,4 @@ desktop.ini
 # never committed: each 19 MB copy would stay in git history for good.
 *.exe
 version_info.txt
+gsa_ubi_icons.json
