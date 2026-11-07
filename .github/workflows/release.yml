@@ -2,7 +2,8 @@
 # archive, to the GitHub Release for the tag. Releases are numbered by date
 # (2026.10.1 = first release of October 2026); each agent keeps its own app
 # version in GSA_VERSION. Runs when such a tag is pushed, including one created
-# from the Releases page.
+# from the Releases page. A letter suffix (2026.11.1a, used for pre-releases)
+# counts too.
 #
 #   git tag 2026.10.1 && git push origin 2026.10.1
 
@@ -10,7 +11,9 @@ name: Release
 
 on:
   push:
-    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+    # GitHub tag filters are globs ("+" = one or more of the previous item),
+    # not regexes; the second pattern adds the pre-release letter suffix.
+    tags: ["[0-9]+.[0-9]+.[0-9]+", "[0-9]+.[0-9]+.[0-9]+[a-z]+"]
   workflow_dispatch:
     inputs:
       tag:
