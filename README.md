@@ -135,7 +135,7 @@ Gaming Status Agent uses whichever source knows the game's real name, in this or
 5. **Xbox / Microsoft Store** *(off by default)* — reads installed Store
    packages from the app registry, keeps the ones carrying a game manifest, and
    matches any process running from inside a package folder.
-6. **Riot Games, HoYoverse, Minecraft, Roblox and Rockstar Games** *(off by default)* — matched by the
+6. **Riot Games, HoYoverse, Minecraft, Roblox, and Rockstar Games** *(off by default)* — matched by the
    game's own executable, so lobbies and launchers never count as playing.
    League of Legends and Teamfight Tactics share one executable; the game's
    local Live Client Data API tells them apart once a match has loaded.
@@ -181,7 +181,7 @@ While Steam is off, anything launched through Steam is ignored, Playnite-launche
 Steam games included. A **Custom Games** rule still overrides that, because it's
 deliberate configuration rather than automatic detection.
 
-### Riot Games, HoYoverse, Minecraft, Roblox and Rockstar Games are opt-in
+### Riot Games, HoYoverse, Minecraft, Roblox, and Rockstar Games are opt-in
 
 These are matched by fixed executable names rather than a launcher's own
 records, so they stay off until you switch them on under **Platforms**. Once
@@ -206,7 +206,7 @@ emulator too.
 2. Restart RPCS3 once.
 3. In Gaming Status Agent, switch on **RPCS3** under **Platforms**.
 
-RPCS3 support is new and hasn't been tested on many setups. If it doesn't pick
+RPCS3 support hasn't been tested on many setups. If it doesn't pick
 up your game, please report it with your Run Diagnostics output.
 
 If you changed the slot or port, set `PCSX2_PINE_SLOT` or `RPCS3_IPC_SLOT` in
