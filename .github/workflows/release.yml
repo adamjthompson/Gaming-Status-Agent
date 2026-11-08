@@ -91,7 +91,9 @@ jobs:
           $sums = foreach ($f in $files) {
             "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path $f -Leaf)
           }
-          Set-Content -Path SHA256SUMS.txt -Value $sums -Encoding utf8NoBOM
+          # LF line endings (not Set-Content's Windows CRLF): sha256sum -c on
+          # Linux/macOS would otherwise read each filename with a trailing \r.
+          [IO.File]::WriteAllText("$PWD/SHA256SUMS.txt", (($sums -join "`n") + "`n"))
           Get-Content SHA256SUMS.txt
           $files += "SHA256SUMS.txt"
           gh release view $env:TAG *> $null
