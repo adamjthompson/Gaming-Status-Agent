@@ -13,6 +13,15 @@ After=network-online.target graphical-session.target
 ExecStart=/usr/bin/python3 %h/gaming-status-agent/linux/gsa_linux.py --headless
 Restart=on-failure
 RestartSec=10
+# Defence in depth that doesn't affect detection. Don't add ProtectProc=,
+# ProtectHome=, ProtectSystem=strict, PrivateNetwork= or PrivateTmp=: the
+# agent reads other processes' /proc entries, its ~/.config and the Steam
+# and Heroic folders, talks to MQTT and the emulators' sockets in
+# $XDG_RUNTIME_DIR, and some user managers can't create the namespaces
+# PrivateTmp needs.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=default.target
