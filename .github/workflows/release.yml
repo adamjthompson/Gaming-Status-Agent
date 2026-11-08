@@ -86,16 +86,6 @@ jobs:
       - name: Publish release
         run: |
           $files = @("windows/dist/GamingStatusAgent.exe", "gaming-status-agent-linux-$env:LINUX_VERSION.zip")
-          # Checksums so users can verify a download (sha256sum -c on Linux,
-          # Get-FileHash on Windows). Same "hash  name" format as sha256sum.
-          $sums = foreach ($f in $files) {
-            "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path $f -Leaf)
-          }
-          # LF line endings (not Set-Content's Windows CRLF): sha256sum -c on
-          # Linux/macOS would otherwise read each filename with a trailing \r.
-          [IO.File]::WriteAllText("$PWD/SHA256SUMS.txt", (($sums -join "`n") + "`n"))
-          Get-Content SHA256SUMS.txt
-          $files += "SHA256SUMS.txt"
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
             # Created from the Releases page: add the builds, keep its notes.

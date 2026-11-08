@@ -48,7 +48,8 @@ folder made at the top of `C:\` (or any folder other accounts can write to),
 since anyone who could edit the config there could point the agent at their
 own MQTT broker and collect your password. To check a download, compare its
 SHA-256 (`Get-FileHash GamingStatusAgent.exe` in PowerShell; capitalization
-doesn't matter) with `SHA256SUMS.txt` on the release.
+doesn't matter) with the `sha256:` value GitHub shows next to the file on the
+release page.
 
 **From source:**
 
