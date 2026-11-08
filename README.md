@@ -41,8 +41,14 @@ A separate Linux version covers the following (see [Linux](#linux)):
 ## Install
 
 **From a release:** download `GamingStatusAgent.exe` from the
-[Releases page](../../releases/latest), put it anywhere you like, and run it.
-It creates its config file next to itself, so a dedicated folder is tidiest.
+[Releases page](../../releases/latest), put it in its own folder, and run it.
+It creates its config file next to itself. `%LOCALAPPDATA%\Programs\GamingStatusAgent`
+is a good choice: only your Windows account can change files there. Avoid a
+folder made at the top of `C:\` (or any folder other accounts can write to),
+since anyone who could edit the config there could point the agent at their
+own MQTT broker and collect your password. To check a download, compare its
+SHA-256 (`Get-FileHash GamingStatusAgent.exe` in PowerShell; capitalization
+doesn't matter) with `SHA256SUMS.txt` on the release.
 
 **From source:**
 

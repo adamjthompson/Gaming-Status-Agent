@@ -27,6 +27,7 @@ import logging
 import argparse
 import threading
 import subprocess
+import time
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
@@ -172,6 +173,13 @@ PLATFORM_NOTES = {
 
 # Filled in at startup and on every restart.
 STEAM_BY_APPID = {}
+# AppIds that are running but missing from STEAM_BY_APPID even after a
+# rescan (tool AppIds skipped on purpose, non-Steam shortcuts, unreadable
+# manifests): appid -> time.monotonic() of that last rescan. Rescanning on
+# every poll for these would reread every library's manifests every few
+# seconds for the whole session.
+STEAM_MISSES = {}
+STEAM_MISS_RESCAN_SECONDS = 300
 STEAM_SCAN_INFO = {"root": "", "libraries": [], "games": 0}
 # [(install dir with trailing slash, title, launcher label)]
 HEROIC_GAMES = []
@@ -478,14 +486,25 @@ def find_steam_game(snapshot):
             continue
         name = STEAM_BY_APPID.get(appid)
         if not name:
-            # Installed since startup: rescan once rather than wait for a restart.
-            STEAM_BY_APPID = get_steam_mapping()
-            name = STEAM_BY_APPID.get(appid)
+            # Installed since startup: rescan rather than wait for a restart.
+            # A miss is retried every few minutes, not every poll, which still
+            # catches a manifest Steam was writing when the game launched.
+            last_miss = STEAM_MISSES.get(appid)
+            if last_miss is None or time.monotonic() - last_miss >= STEAM_MISS_RESCAN_SECONDS:
+                STEAM_BY_APPID = get_steam_mapping()
+                name = STEAM_BY_APPID.get(appid)
+                if name:
+                    STEAM_MISSES.pop(appid, None)
+                else:
+                    if last_miss is None:
+                        # A tool AppId (Proton, runtime) was skipped on
+                        # purpose; anything else is a non-Steam shortcut or
+                        # a game whose manifest could not be read. Logged
+                        # once per AppId so it doesn't flood the log.
+                        debug_log(f"Steam AppId {appid} is running but has no readable manifest.")
+                    STEAM_MISSES[appid] = time.monotonic()
         if name:
             return name
-        # A tool AppId (Proton, runtime) was skipped on purpose; anything else
-        # is a game whose manifest could not be read.
-        debug_log(f"Steam AppId {appid} is running but has no readable manifest.")
     return None
 
 
@@ -1202,6 +1221,7 @@ def stop_services():
 def scan_installed_games():
     global STEAM_BY_APPID
     STEAM_BY_APPID = get_steam_mapping() if platform_enabled("Steam") else {}
+    STEAM_MISSES.clear()
     # Forget the last signature so a restart (e.g. a platform switched on)
     # always rereads Heroic's lists.
     _HEROIC_SIGNATURE[0] = None
