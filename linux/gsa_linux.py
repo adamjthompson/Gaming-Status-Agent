@@ -34,7 +34,7 @@ from datetime import datetime
 import paho.mqtt.client as mqtt
 import psutil
 
-GSA_VERSION = "1.1.3"
+GSA_VERSION = "1.1.4"
 
 # --- GLOBALS & PATHS ---
 client = None
