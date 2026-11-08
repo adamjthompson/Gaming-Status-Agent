@@ -23,7 +23,7 @@ over MQTT. It detects games from the following launchers and publishes a single 
 Home Assistant discovers the sensor automatically. No YAML required. 
 
 A separate Linux version covers the following (see [Linux](#linux)):
-- Heroic (Epic, GOG and Amazon)
+- Heroic (Epic, GOG, and Amazon)
 - Lutris
 - PCSX2
 - RPCS3 (experimental)
