@@ -3087,8 +3087,10 @@ def _rebuild_mqtt_if_wakeup_broken(broken, error):
 
     paho wakes its network thread through a loopback socket pair that it
     creates once, in loop_start(), and never repairs. When Windows aborts that
-    pair (WinError 10053, seen about a minute after login), every publish()
-    and keepalive ping raises OSError. The link then drops every 60 seconds,
+    pair (WinError 10053, seen in the first minute or so after login or after
+    waking from sleep), every publish() and keepalive ping raises OSError.
+    Pairs created in that window can die too, so more than one rebuild in a
+    row is expected. The link then drops every 60 seconds,
     the post-connect republish is skipped, and Home Assistant stays on the
     broker's Offline will until Gaming Status Agent is restarted. Only a new
     client gets a new pair. publish() raises OSError for no other reason.
