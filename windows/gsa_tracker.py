@@ -1551,13 +1551,15 @@ def publish_global_state(status, game_title, launcher_name, wait=False):
 def _publish_raw(topic, data):
     """Publish a retained message (bytes or str) on any topic. Returns True
     once it's handed to a connected client, so callers can retry later."""
-    if not client:
+    mqtt_client = client
+    if not mqtt_client:
         return False
     try:
-        info = client.publish(topic, data, qos=1, retain=True)
+        info = mqtt_client.publish(topic, data, qos=1, retain=True)
         return info.rc == mqtt.MQTT_ERR_SUCCESS
     except Exception as e:
         debug_log(f"MQTT publish to {topic} failed: {e}")
+        _rebuild_mqtt_if_wakeup_broken(mqtt_client, e)
         return False
 
 
@@ -1577,14 +1579,16 @@ def _offline_payload():
 
 
 def _publish_payload(payload, wait=False):
-    if not client:
+    mqtt_client = client
+    if not mqtt_client:
         return
     try:
         # QoS 1: a retained QoS 0 state message is dropped outright if the
         # link is down, which leaves Home Assistant showing a stale game.
-        info = client.publish(get_state_topic(), json.dumps(payload), qos=1, retain=True)
+        info = mqtt_client.publish(get_state_topic(), json.dumps(payload), qos=1, retain=True)
     except Exception as e:
         debug_log(f"MQTT publish failed: {e}")
+        _rebuild_mqtt_if_wakeup_broken(mqtt_client, e)
         return
     # publish() only queues the message. A non-zero rc means it was not even
     # handed to the network (usually no connection yet); _on_connect republishes
@@ -2839,6 +2843,7 @@ def _on_connect(mqtt_client, userdata, *args):
                 ubisoft_reporter.request_publish()
         except Exception as e:
             debug_log(f"Post-connect publish failed: {e}")
+            _rebuild_mqtt_if_wakeup_broken(mqtt_client, e)
     else:
         debug_log(f"MQTT connection refused (check credentials/TLS): {rc}")
 
@@ -2916,17 +2921,9 @@ def rebuild_active_tables():
 MQTT_SETUP_ERROR = ""
 
 
-def start_services():
-    global client, observer, custom_tracker, ubisoft_reporter
-    global CONFIG, PROFILE_SANITIZED, MQTT_SETUP_ERROR
-    global GOG_BY_PATH, GOG_BY_NAME, BATTLENET_BY_DIR
-    global STEAM_BY_DIR, STEAM_BY_APPID, XBOX_BY_DIR
-    debug_log("Starting Gaming Status Agent services...")
-
-    CONFIG = load_config()
-    PROFILE_SANITIZED = sanitize_topic_part(CONFIG.get("HA_DEVICE_NAME", "User"))
-    rebuild_active_tables()
-
+def _start_mqtt():
+    """Build the MQTT client and start connecting in the background."""
+    global client, MQTT_SETUP_ERROR
     MQTT_SETUP_ERROR = ""
     client = _build_mqtt_client()
     client.on_connect = _on_connect
@@ -2968,6 +2965,20 @@ def start_services():
             client.loop_start()
         except Exception as e:
             debug_log(f"MQTT setup failed (check IP/Port): {e}")
+
+
+def start_services():
+    global observer, custom_tracker, ubisoft_reporter
+    global CONFIG, PROFILE_SANITIZED
+    global GOG_BY_PATH, GOG_BY_NAME, BATTLENET_BY_DIR
+    global STEAM_BY_DIR, STEAM_BY_APPID, XBOX_BY_DIR
+    debug_log("Starting Gaming Status Agent services...")
+
+    CONFIG = load_config()
+    PROFILE_SANITIZED = sanitize_topic_part(CONFIG.get("HA_DEVICE_NAME", "User"))
+    rebuild_active_tables()
+
+    _start_mqtt()
 
     observer = Observer()
     if platform_enabled("Epic") and os.path.exists(EPIC_LOG_DIR):
@@ -3039,6 +3050,41 @@ def restart_services():
                 start_services()
             except Exception as e:
                 debug_log(f"Restart failed: {e}")
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _rebuild_mqtt_if_wakeup_broken(broken, error):
+    """Replace an MQTT client whose internal wake-up socket has died.
+
+    paho wakes its network thread through a loopback socket pair that it
+    creates once, in loop_start(), and never repairs. When Windows aborts that
+    pair (WinError 10053, seen about a minute after login), every publish()
+    and keepalive ping raises OSError. The link then drops every 60 seconds,
+    the post-connect republish is skipped, and Home Assistant stays on the
+    broker's Offline will until Gaming Status Agent is restarted. Only a new
+    client gets a new pair. publish() raises OSError for no other reason.
+    """
+    if not isinstance(error, OSError):
+        return
+
+    def worker():
+        with RESTART_LOCK:
+            if client is not broken:
+                return  # already replaced, or the services are stopping
+            debug_log("MQTT wake-up socket is broken; rebuilding the MQTT client.")
+            try:
+                broken.loop_stop()
+                try:
+                    broken.disconnect()
+                except OSError:
+                    pass  # the DISCONNECT is queued before the dead socket raises
+                # Put it on the wire: a clean disconnect stops the broker from
+                # publishing our Offline will over the new client's state.
+                broken.loop_write()
+            except Exception as e:
+                debug_log(f"Error while dropping the broken MQTT client: {e}")
+            _start_mqtt()
 
     threading.Thread(target=worker, daemon=True).start()
 
