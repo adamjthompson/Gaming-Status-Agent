@@ -2888,11 +2888,28 @@ def stop_services():
             # Block until the final Offline message is actually on the wire;
             # loop_stop() otherwise discards it while it is still queued.
             publish_global_state("idle", "Offline", "None", wait=True)
-            client.loop_stop()
-            client.disconnect()
+            _drop_mqtt_client(client)
         except Exception as e:
             debug_log(f"Error during MQTT shutdown: {e}")
         client = None
+
+
+def _drop_mqtt_client(mqtt_client):
+    """Stop an MQTT client and tell the broker it is leaving on purpose.
+
+    Without a clean DISCONNECT the broker publishes our Offline will once it
+    notices the connection is gone, which can land after (and overwrite) the
+    state the next client publishes. disconnect() raises OSError when paho's
+    wake-up socket has died, but the DISCONNECT is queued before that, so
+    loop_write() still sends it. When disconnect() succeeds it has already
+    sent the packet and closed the socket, and loop_write() does nothing.
+    """
+    mqtt_client.loop_stop()
+    try:
+        mqtt_client.disconnect()
+    except OSError:
+        pass
+    mqtt_client.loop_write()
 
 
 def rebuild_active_tables():
@@ -3054,6 +3071,17 @@ def restart_services():
     threading.Thread(target=worker, daemon=True).start()
 
 
+# Shortest time between two rebuilds of the MQTT client, in seconds.
+MQTT_REBUILD_MIN_GAP = 30
+# A rebuild is queued or running; later failures wait for it instead.
+_mqtt_rebuild_pending = False
+# time.monotonic() of the last rebuild, or None before the first. Not 0: the
+# clock's zero is arbitrary (on Windows it is boot time, which can be under
+# MQTT_REBUILD_MIN_GAP seconds ago), so 0 could delay the first rebuild.
+_mqtt_last_rebuild = None
+_MQTT_REBUILD_STATE_LOCK = threading.Lock()
+
+
 def _rebuild_mqtt_if_wakeup_broken(broken, error):
     """Replace an MQTT client whose internal wake-up socket has died.
 
@@ -3065,26 +3093,40 @@ def _rebuild_mqtt_if_wakeup_broken(broken, error):
     broker's Offline will until Gaming Status Agent is restarted. Only a new
     client gets a new pair. publish() raises OSError for no other reason.
     """
+    global _mqtt_rebuild_pending
     if not isinstance(error, OSError):
         return
+    # Every publish on the broken client fails the same way (the Ubisoft
+    # reporter can send dozens of icons in a row); one rebuild covers them all.
+    with _MQTT_REBUILD_STATE_LOCK:
+        if _mqtt_rebuild_pending:
+            return
+        _mqtt_rebuild_pending = True
 
     def worker():
-        with RESTART_LOCK:
-            if client is not broken:
-                return  # already replaced, or the services are stopping
-            debug_log("MQTT wake-up socket is broken; rebuilding the MQTT client.")
-            try:
-                broken.loop_stop()
+        global _mqtt_rebuild_pending, _mqtt_last_rebuild
+        try:
+            # If whatever kills the pair keeps doing it, rebuilding on every
+            # failure would reconnect to the broker as fast as it answers.
+            wait = 0
+            if _mqtt_last_rebuild is not None:
+                wait = _mqtt_last_rebuild + MQTT_REBUILD_MIN_GAP - time.monotonic()
+            if wait > 0:
+                debug_log(f"MQTT wake-up socket is broken again; rebuilding in {wait:.1f}s.")
+                time.sleep(wait)
+            with RESTART_LOCK:
+                if client is not broken:
+                    return  # already replaced, or the services are stopping
+                debug_log("MQTT wake-up socket is broken; rebuilding the MQTT client.")
                 try:
-                    broken.disconnect()
-                except OSError:
-                    pass  # the DISCONNECT is queued before the dead socket raises
-                # Put it on the wire: a clean disconnect stops the broker from
-                # publishing our Offline will over the new client's state.
-                broken.loop_write()
-            except Exception as e:
-                debug_log(f"Error while dropping the broken MQTT client: {e}")
-            _start_mqtt()
+                    _drop_mqtt_client(broken)
+                except Exception as e:
+                    debug_log(f"Error while dropping the broken MQTT client: {e}")
+                _start_mqtt()
+                _mqtt_last_rebuild = time.monotonic()
+        finally:
+            with _MQTT_REBUILD_STATE_LOCK:
+                _mqtt_rebuild_pending = False
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -3586,7 +3628,10 @@ def force_offline(icon, item):
 
 
 def quit_app(icon, item):
-    stop_services()
+    # Holding the lock makes a pending MQTT rebuild wait, then find no client,
+    # instead of starting a new one while Gaming Status Agent is shutting down.
+    with RESTART_LOCK:
+        stop_services()
     icon.stop()
     ROOT.after(0, ROOT.quit)
 
