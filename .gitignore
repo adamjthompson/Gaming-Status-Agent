@@ -7,6 +7,8 @@ gsa_debug.log
 gsa_debug.log.*
 gsa_diagnostics.txt
 gsa_ubi_ids.json
+gsa_update.json
+gsa_update.json.tmp
 "Gaming Status Agent.spec"
 GamingStatusAgent.spec
 

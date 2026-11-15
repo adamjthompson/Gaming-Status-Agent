@@ -28,13 +28,15 @@ import argparse
 import threading
 import subprocess
 import time
+import urllib.request
+import webbrowser
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
 import paho.mqtt.client as mqtt
 import psutil
 
-GSA_VERSION = "1.1.4"
+GSA_VERSION = "1.2.0"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -61,6 +63,9 @@ DEBUG_LOG_FILE = os.path.join(CONFIG_DIR, "gsa_debug.log")
 AUTOSTART_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"),
                               "autostart", "gaming-status-agent.desktop")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# When the update check last ran and which version was last announced, so a
+# restart neither checks again early nor repeats the notification.
+UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "gsa_update.json")
 
 MAX_TITLE_LEN = 255
 MAX_ANCESTRY_DEPTH = 20
@@ -139,7 +144,10 @@ DEFAULT_CONFIG = {
     "MQTT_TLS": False,
     "MQTT_CA_CERT": "",
     "POLL_INTERVAL": 5,
-    "CUSTOM_GAMES": []
+    "CUSTOM_GAMES": [],
+    # Once a day, ask GitHub whether a newer release exists, and say so in the
+    # tray and as a Home Assistant update entity. Switched from the tray.
+    "CHECK_FOR_UPDATES": True
 }
 
 LAUNCHER_PROFILE_KEYS = {
@@ -340,7 +348,7 @@ def load_config():
     merged["POLL_INTERVAL"] = _coerce_int(merged.get("POLL_INTERVAL"), 5, 1, 3600)
     merged["MQTT_TLS"] = bool(merged.get("MQTT_TLS"))
 
-    for enable_key in PLATFORM_ENABLE_KEYS.values():
+    for enable_key in (*PLATFORM_ENABLE_KEYS.values(), "CHECK_FOR_UPDATES"):
         raw = merged.get(enable_key, DEFAULT_CONFIG[enable_key])
         if isinstance(raw, str):
             raw = raw.strip().lower() not in ("", "0", "false", "no", "off")
@@ -1093,8 +1101,17 @@ def republish_current_state():
                               profile_for_launcher(state["launcher"])))
 
 
-def setup_mqtt_discovery(mqtt_client):
+def _ha_device():
+    """The Home Assistant device every entity from this agent belongs to."""
     device_name = CONFIG.get("HA_DEVICE_NAME", "User")
+    return {
+        "identifiers": [f"gsa_client_{PROFILE_SANITIZED}"],
+        "name": f"Gaming Status Agent {device_name}",
+        "manufacturer": "Gaming Status Agent"
+    }
+
+
+def setup_mqtt_discovery(mqtt_client):
     config_payload = {
         "name": None,
         "has_entity_name": True,
@@ -1103,14 +1120,321 @@ def setup_mqtt_discovery(mqtt_client):
         "value_template": "{{ value_json['Game Title'] }}",
         "json_attributes_topic": get_state_topic(),
         "unique_id": f"gsa_{PROFILE_SANITIZED}",
-        "device": {
-            "identifiers": [f"gsa_client_{PROFILE_SANITIZED}"],
-            "name": f"Gaming Status Agent {device_name}",
-            "manufacturer": "Gaming Status Agent"
-        },
+        "device": _ha_device(),
         "icon": "mdi:controller"
     }
     mqtt_client.publish(get_config_topic(), json.dumps(config_payload), qos=1, retain=True)
+
+
+# --- UPDATE CHECK ---
+# Every release attaches versions.json, {"tag": ..., "windows": ..., "linux": ...}.
+# Releases are tagged by date and each agent keeps its own version, so the tag
+# alone does not say whether this agent changed.
+# GitHub's "latest" is the newest full release, so pre-releases are never offered.
+UPDATE_MANIFEST_URL = ("https://github.com/adamjthompson/Gaming-Status-Agent"
+                       "/releases/latest/download/versions.json")
+RELEASES_URL = "https://github.com/adamjthompson/Gaming-Status-Agent/releases/latest"
+RELEASE_TAG_URL = "https://github.com/adamjthompson/Gaming-Status-Agent/releases/tag/{tag}"
+UPDATE_PLATFORM_KEY = "linux"
+UPDATE_TITLE = "Gaming Status Agent for Linux"
+UPDATE_CHECK_INTERVAL = 24 * 3600
+# The first check waits a minute so it never competes with startup, and a
+# failed check is retried at the next wake-up rather than a day later.
+UPDATE_FIRST_DELAY = 60
+UPDATE_WAKE_INTERVAL = 3600
+MAX_MANIFEST_BYTES = 64 * 1024
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# The tag ends up in a URL, so only plain tag characters are accepted.
+RELEASE_TAG_RE = re.compile(r"^[0-9A-Za-z.\-]{1,64}$")
+
+UPDATE_LOCK = threading.Lock()
+# What the tray, Home Assistant and diagnostics show. last_check is the last
+# successful check, last_attempt the last try; both are wall-clock epochs.
+UPDATE_INFO = {"latest": "", "tag": "", "available": False,
+               "last_check": 0.0, "last_attempt": 0.0, "error": ""}
+update_checker = None
+tray_icon = None
+
+
+def update_check_enabled():
+    return bool(CONFIG.get("CHECK_FOR_UPDATES", True))
+
+
+def _is_newer(latest, current):
+    try:
+        return (tuple(int(p) for p in latest.split("."))
+                > tuple(int(p) for p in current.split(".")))
+    except (AttributeError, ValueError):
+        return False
+
+
+def _set_update_info(latest, tag):
+    """Record the newest release seen. True if it is newer than this copy."""
+    available = _is_newer(latest, GSA_VERSION)
+    with UPDATE_LOCK:
+        UPDATE_INFO.update(latest=latest, tag=tag, available=available)
+    return available
+
+
+def release_url():
+    with UPDATE_LOCK:
+        tag = UPDATE_INFO["tag"]
+    return RELEASE_TAG_URL.format(tag=tag) if tag else RELEASES_URL
+
+
+def load_update_state():
+    """Read the saved update state and restore UPDATE_INFO from it."""
+    state = {}
+    try:
+        with open(UPDATE_STATE_FILE, 'r', encoding='utf-8') as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            state = loaded
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        debug_log(f"Could not read update state ({e}); starting fresh.")
+
+    latest, tag = state.get("latest"), state.get("tag")
+    if isinstance(latest, str) and VERSION_RE.match(latest):
+        _set_update_info(latest, tag if isinstance(tag, str) and RELEASE_TAG_RE.match(tag) else "")
+    last = state.get("last_check")
+    if isinstance(last, (int, float)):
+        with UPDATE_LOCK:
+            UPDATE_INFO["last_check"] = float(last)
+    return state
+
+
+def _save_update_state(state):
+    tmp_path = UPDATE_STATE_FILE + ".tmp"
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=4)
+        os.replace(tmp_path, UPDATE_STATE_FILE)
+    except Exception as e:
+        debug_log(f"Could not save update state: {e}")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def fetch_latest_version():
+    """(version, tag) of this agent in the latest release. Raises on any problem."""
+    # Only the app version goes out, in the User-Agent; nothing about the user.
+    req = urllib.request.Request(
+        UPDATE_MANIFEST_URL,
+        headers={'User-Agent': f'Gaming-Status-Agent/{GSA_VERSION}'}
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        content = response.read(MAX_MANIFEST_BYTES + 1)
+    if len(content) > MAX_MANIFEST_BYTES:
+        raise ValueError("versions.json exceeds size limit")
+    # utf-8-sig: a BOM written by the release workflow must not break the parse.
+    manifest = json.loads(content.decode('utf-8-sig'))
+    if not isinstance(manifest, dict):
+        raise ValueError("versions.json is not an object")
+    latest = manifest.get(UPDATE_PLATFORM_KEY)
+    if not isinstance(latest, str) or not VERSION_RE.match(latest):
+        raise ValueError(f"versions.json has no valid {UPDATE_PLATFORM_KEY!r} version: {latest!r}")
+    tag = manifest.get("tag")
+    return latest, (tag if isinstance(tag, str) and RELEASE_TAG_RE.match(tag) else "")
+
+
+def get_update_config_topic():
+    return f"homeassistant/update/gsa_{PROFILE_SANITIZED}/config"
+
+
+def get_update_state_topic():
+    return f"homeassistant/update/gsa_{PROFILE_SANITIZED}/state"
+
+
+def _update_state_payload():
+    payload = {"installed_version": GSA_VERSION, "title": UPDATE_TITLE}
+    with UPDATE_LOCK:
+        latest = UPDATE_INFO["latest"]
+    # Until a check succeeds Home Assistant shows "unknown", rather than
+    # claiming this copy is up to date.
+    if latest:
+        payload["latest_version"] = latest
+        payload["release_url"] = release_url()
+    return payload
+
+
+def setup_update_discovery(mqtt_client):
+    """Publish the Home Assistant update entity, or remove it while the check is off.
+
+    It sits on the same device as the sensor. There is no command topic, so
+    Home Assistant offers no Install button, only the release link.
+    """
+    if not update_check_enabled():
+        # An empty retained config removes the entity; clear its state too.
+        mqtt_client.publish(get_update_config_topic(), "", qos=1, retain=True)
+        mqtt_client.publish(get_update_state_topic(), "", qos=1, retain=True)
+        return
+    config_payload = {
+        "name": None,
+        "has_entity_name": True,
+        "default_entity_id": f"update.gsa_{PROFILE_SANITIZED}",
+        "state_topic": get_update_state_topic(),
+        "unique_id": f"gsa_{PROFILE_SANITIZED}_update",
+        "device": _ha_device(),
+    }
+    mqtt_client.publish(get_update_config_topic(), json.dumps(config_payload), qos=1, retain=True)
+    mqtt_client.publish(get_update_state_topic(), json.dumps(_update_state_payload()),
+                        qos=1, retain=True)
+
+
+def _publish_retained(topic, data):
+    """Publish a retained message if a client exists; never raises."""
+    mqtt_client = client
+    if not mqtt_client:
+        return False
+    try:
+        info = mqtt_client.publish(topic, data, qos=1, retain=True)
+        return info.rc == mqtt.MQTT_ERR_SUCCESS
+    except Exception as e:
+        debug_log(f"MQTT publish to {topic} failed: {e}")
+        return False
+
+
+def refresh_tray_menu():
+    icon = tray_icon
+    if icon:
+        try:
+            icon.update_menu()
+        except Exception as e:
+            debug_log(f"Could not refresh the tray menu: {e}")
+
+
+def notify_update(latest):
+    """Show a desktop notification. True if it was shown."""
+    icon = tray_icon
+    # Some pystray backends (plain X11 tray) cannot show notifications.
+    if not icon or not getattr(icon, "HAS_NOTIFICATION", False):
+        return False
+    try:
+        icon.notify(f"Version {latest} is available. Choose \"Update available\" "
+                    "in the tray menu to download it.", "Gaming Status Agent update")
+        return True
+    except Exception as e:
+        debug_log(f"Could not show the update notification: {e}")
+        return False
+
+
+class UpdateChecker(threading.Thread):
+    """Checks for a newer release once a day, for as long as the app runs.
+
+    Started once at launch (tray or headless), not by start_services(): every Save & Apply
+    restarts the services, and that must not re-check or re-notify. The last
+    check time is saved, so restarts and sleep don't move the daily schedule.
+    """
+
+    def __init__(self):
+        super().__init__(daemon=True, name="UpdateChecker")
+        self._wake = threading.Event()
+        self._stopping = False
+        self.state = load_update_state()
+
+    def stop(self):
+        self._stopping = True
+        self._wake.set()
+
+    def wake(self):
+        """Look again now; a check still only runs if one is due."""
+        self._wake.set()
+
+    def _sleep(self, seconds):
+        self._wake.wait(seconds)
+        self._wake.clear()
+        return not self._stopping
+
+    def run(self):
+        if UPDATE_INFO["available"]:
+            refresh_tray_menu()
+        if not self._sleep(UPDATE_FIRST_DELAY):
+            return
+        while True:
+            try:
+                self.check_if_due()
+            except Exception as e:
+                debug_log(f"Update check failed: {e}")
+            if not self._sleep(UPDATE_WAKE_INTERVAL):
+                return
+
+    def check_if_due(self):
+        if not update_check_enabled():
+            return
+        now = time.time()
+        last = self.state.get("last_check")
+        # A last check in the future means the clock moved back; check now.
+        if isinstance(last, (int, float)) and 0 <= now - last < UPDATE_CHECK_INTERVAL:
+            return
+        with UPDATE_LOCK:
+            UPDATE_INFO["last_attempt"] = now
+        try:
+            latest, tag = fetch_latest_version()
+        except Exception as e:
+            with UPDATE_LOCK:
+                UPDATE_INFO["error"] = str(e)[:200]
+            debug_log(f"Update check failed, retrying within the hour: {e}")
+            return
+
+        available = _set_update_info(latest, tag)
+        with UPDATE_LOCK:
+            UPDATE_INFO.update(error="", last_check=now)
+        self.state.update(last_check=now, latest=latest, tag=tag)
+        if available:
+            debug_log(f"Update available: {latest} (this is {GSA_VERSION}). {release_url()}")
+        else:
+            debug_log(f"Update check: {GSA_VERSION} is current (latest release has {latest}).")
+
+        _publish_retained(get_update_state_topic(), json.dumps(_update_state_payload()))
+        refresh_tray_menu()
+        # One notification per new version, not one a day.
+        if available and self.state.get("notified") != latest and notify_update(latest):
+            self.state["notified"] = latest
+        _save_update_state(self.state)
+
+
+def toggle_update_check(icon, item):
+    CONFIG["CHECK_FOR_UPDATES"] = not update_check_enabled()
+    save_config()
+    debug_log(f"Check for updates {'on' if update_check_enabled() else 'off'}.")
+    mqtt_client = client
+    if mqtt_client:
+        try:
+            setup_update_discovery(mqtt_client)
+        except Exception as e:
+            debug_log(f"Could not update the Home Assistant update entity: {e}")
+    # The tick and the "Update available" item both depend on this setting.
+    refresh_tray_menu()
+    if update_checker:
+        update_checker.wake()
+
+
+def update_check_checked(item=None):
+    return update_check_enabled()
+
+
+def update_menu_visible(item=None):
+    with UPDATE_LOCK:
+        available = UPDATE_INFO["available"]
+    return update_check_enabled() and available
+
+
+def update_menu_text(item=None):
+    with UPDATE_LOCK:
+        latest = UPDATE_INFO["latest"]
+    return f"Update available: {latest}"
+
+
+def open_release_page(icon, item):
+    try:
+        webbrowser.open(release_url())
+    except Exception as e:
+        debug_log(f"Could not open the release page: {e}")
 
 
 def _build_mqtt_client():
@@ -1131,6 +1455,7 @@ def _on_connect(mqtt_client, userdata, *args):
         debug_log(f"MQTT Connected successfully to {CONFIG.get('MQTT_BROKER')}")
         try:
             setup_mqtt_discovery(mqtt_client)
+            setup_update_discovery(mqtt_client)
             republish_current_state()
         except Exception as e:
             debug_log(f"Post-connect publish failed: {e}")
@@ -1345,6 +1670,21 @@ def build_diagnostic_report():
            f"MQTT: {MQTT_SETUP_ERROR or ('connected' if client and client.is_connected() else 'not connected')}",
            f"Session: {os.environ.get('XDG_SESSION_TYPE') or 'unknown'}",
            ""]
+
+    with UPDATE_LOCK:
+        info = dict(UPDATE_INFO)
+
+    def when(epoch):
+        return datetime.fromtimestamp(epoch).strftime('%Y-%m-%d %H:%M:%S') if epoch else "never"
+
+    out.append(f"Updates: checking {'on' if update_check_enabled() else 'off'}, "
+               f"last check {when(info['last_check'])}")
+    if info["latest"]:
+        verdict = "update available" if info["available"] else "up to date"
+        out.append(f"  latest release: {info['latest']} ({verdict})")
+    if info["error"]:
+        out.append(f"  last error: {info['error']} ({when(info['last_attempt'])})")
+    out.append("")
 
     out.append("Platforms:")
     for name in PLATFORM_ORDER:
@@ -1754,6 +2094,10 @@ def create_tray_menu():
                          visible=lambda item: platform_enabled("Custom")),
         pystray.MenuItem("Start Gaming Status Agent at Login", toggle_startup,
                          checked=startup_enabled),
+        pystray.MenuItem("Check for Updates", toggle_update_check,
+                         checked=update_check_checked),
+        pystray.MenuItem(update_menu_text, open_release_page,
+                         visible=update_menu_visible),
         pystray.MenuItem("Run Diagnostics", _on_ui(show_diagnostics_ui)),
         pystray.MenuItem("Force Offline", force_offline),
         pystray.MenuItem("Quit", quit_app)
@@ -1761,7 +2105,7 @@ def create_tray_menu():
 
 
 def run_tray():
-    global ROOT, CONFIG
+    global ROOT, CONFIG, tray_icon, update_checker
     import pystray
     tk = _gui()[0]
     ROOT = tk.Tk()
@@ -1780,11 +2124,16 @@ def run_tray():
         CONFIG = load_config()
         save_config()
         set_startup(True)
+    # Built before the services so the saved result is already there when MQTT
+    # connects and publishes the update entity.
+    update_checker = UpdateChecker()
     start_services()
 
     icon = pystray.Icon("gaming-status-agent", create_image(), "Gaming Status Agent",
                         create_tray_menu())
+    tray_icon = icon
     threading.Thread(target=icon.run, daemon=True).start()
+    update_checker.start()
     if first_run:
         ROOT.after(300, show_platforms_ui)
         ROOT.after(400, show_settings_ui)
@@ -1792,13 +2141,17 @@ def run_tray():
 
 
 def run_headless():
+    global CONFIG, update_checker
     if not os.path.exists(CONFIG_FILE):
-        global CONFIG
         CONFIG = load_config()
         save_config()
         debug_log(f"Wrote a default config to {CONFIG_FILE}. Set MQTT_BROKER and the "
                   "ENABLE_* switches there, then restart.")
+    # No tray to notify in: a newer version shows up in the log and as the
+    # Home Assistant update entity.
+    update_checker = UpdateChecker()
     start_services()
+    update_checker.start()
     done = threading.Event()
 
     def shutdown(signum, frame):
@@ -1816,6 +2169,7 @@ def run_diagnose():
     CONFIG = load_config()
     PROFILE_SANITIZED = sanitize_topic_part(CONFIG.get("HA_DEVICE_NAME", "User"))
     scan_installed_games()
+    load_update_state()
     print(build_diagnostic_report())
 
 

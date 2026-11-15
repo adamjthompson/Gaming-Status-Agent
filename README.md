@@ -89,6 +89,8 @@ tray menu.
 | **Platforms** | Which stores to track — Steam and Xbox start switched off |
 | **Gamertags** | Your gamertag per store — shown as the sensor's `Profile Name`. Lists only the platforms you're tracking |
 | **Custom Games** | Match games Gaming Status Agent doesn't detect on its own, by executable or window title. Appears once **Custom** is switched on under Platforms |
+| **Check for Updates** | Checks once a day for a newer release (on by default). See [Updates](#updates) |
+| **Update available: x.y.z** | Opens the release page. Only shown when a newer version exists |
 | **Run Diagnostics** | Shows exactly what Gaming Status Agent currently sees and why. Start here when something looks wrong |
 | **Force Offline** | Immediately publish Offline, whatever detection thinks |
 | **Quit** | Publishes Offline, then exits |
@@ -114,6 +116,29 @@ title. Attributes:
 If the PC loses power or drops off the network, the broker publishes `Offline`
 on Gaming Status Agent's behalf via its Last Will, so the sensor never sticks on a game you
 stopped playing hours ago.
+
+## Updates
+
+Once a day, Gaming Status Agent checks GitHub for a newer release. When it finds
+one, it lets you know three ways:
+
+- a desktop notification, once per new version
+- an **Update available: x.y.z** item in the tray menu, which opens the release page
+- an update entity in Home Assistant, `update.gsa_<device name>`, on the same
+  device as the sensor. Home Assistant lists it under **Settings → Updates**
+  with a link to the release. There's no Install button: download the new
+  version from the release page as usual.
+
+Nothing is downloaded or installed automatically. The check fetches one small
+file, `versions.json`, from the latest release. It sends nothing about you; the
+only thing it identifies is the agent's own version, in the User-Agent header.
+Pre-releases are never offered.
+
+To turn it off, untick **Check for Updates** in the tray menu, or set
+[`CHECK_FOR_UPDATES`](#check_for_updates) to `false`. Turning it off also
+removes the update entity from Home Assistant. The time of the last check is
+kept in `gsa_update.json`, so restarting the agent doesn't trigger an extra
+check, and a version you've already been told about isn't announced again.
 
 ---
 
@@ -332,6 +357,12 @@ Overrides beat both the catalog and the registry.
 How often the detector runs, in seconds. Default `5`. Lower reacts faster and
 costs more CPU.
 
+### `CHECK_FOR_UPDATES`
+
+`true` (default) checks GitHub once a day for a newer release; see
+[Updates](#updates). `false` turns the check off and removes the Home Assistant
+update entity. The tray's **Check for Updates** item changes the same setting.
+
 ---
 
 ## Troubleshooting
@@ -360,9 +391,13 @@ refreshes without closing Gaming Status Agent.
 
 ## Privacy
 
-Everything stays between this PC and your broker. Gaming Status Agent makes exactly one
-outbound internet request for fetching the Ubisoft name catalog and sends no
-telemetry.
+Everything stays between this PC and your broker. Gaming Status Agent makes only
+two kinds of outbound internet request, and sends no telemetry:
+
+- fetching the Ubisoft name catalog (while Ubisoft is tracked)
+- the daily [update check](#updates), which downloads `versions.json` from
+  GitHub and sends nothing but the agent's version. Switch it off with
+  **Check for Updates** in the tray menu.
 
 Your MQTT password is encrypted at rest with Windows DPAPI, scoped to your
 Windows account on this machine. A config file copied to another PC won't
@@ -378,6 +413,7 @@ gsa_debug.log        what you played and when
 gsa_diagnostics.txt  broker address, window titles, process list
 gsa_ubi_ids.json     cached game-name catalog
 gsa_ubi_icons.json   Ubisoft achievement icons already sent to the broker
+gsa_update.json      when the update check last ran, and the newest version seen
 ```
 
 With Ubisoft achievements on, your Ubisoft game list and achievement unlocks
@@ -445,7 +481,9 @@ systemctl --user enable --now gaming-status-agent
 ```
 
 In headless mode, edit `~/.config/gaming-status-agent/gsa_config.json` by hand
-and restart the service to apply the changes.
+and restart the service to apply the changes. With no tray to notify in, a newer
+version shows up in the log and as the Home Assistant
+[update entity](#updates). `CHECK_FOR_UPDATES` turns that off.
 
 ### Diagnostics
 
@@ -565,6 +603,13 @@ repository's **Actions** tab; it takes a few minutes. A release created from
 the Releases page keeps the notes you wrote; one created by pushing a tag gets
 generated notes headed with both app versions. To rebuild an existing
 release, run the workflow by hand from the Actions tab and give it the tag.
+
+The workflow also attaches `versions.json`, which records the tag and both app
+versions. The agents' [daily update check](#updates) reads it from the latest
+release, so a release without it is invisible to them. Every release made by
+the workflow includes it; don't remove it from a release by hand. Agents
+compare their own platform's version, so a release that only bumps the Linux
+agent doesn't prompt Windows users to update.
 
 Exes are never committed to the repository (`*.exe` is gitignored). Use
 `build.bat` for local testing; releases come from the workflow.

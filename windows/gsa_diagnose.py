@@ -26,6 +26,8 @@ def main():
     gsa.CONFIG = gsa.load_config()
     gsa.PROFILE_SANITIZED = gsa.sanitize_topic_part(gsa.CONFIG.get("HA_DEVICE_NAME", "User"))
     gsa.rebuild_active_tables()
+    # The running agent's last update check, for the report's Updates section.
+    gsa.load_update_state()
 
     # Each scan is skipped when its platform is off, matching start_services(),
     # so the report shows what the running agent would actually see.
