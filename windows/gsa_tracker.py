@@ -2837,7 +2837,9 @@ def _ha_device():
     device_name = CONFIG.get("HA_DEVICE_NAME", "User")
     return {
         "identifiers": [f"gsa_client_{PROFILE_SANITIZED}"],
-        "name": f"Gaming Status Agent {device_name}",
+        # Shown wherever Home Assistant names the device, including the sensor's
+        # display name and the Updates list. Entity ids don't depend on it.
+        "name": f"Gaming Status Agent ({device_name})",
         "manufacturer": "Gaming Status Agent"
     }
 
