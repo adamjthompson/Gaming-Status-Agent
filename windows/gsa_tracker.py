@@ -4,9 +4,12 @@ import json
 import re
 import time
 import base64
+import hashlib
 import socket
 import struct
 import logging
+import subprocess
+import tempfile
 import winreg
 import threading
 import ctypes
@@ -2576,6 +2579,8 @@ def build_diagnostic_report():
         out.append(f"  Latest release   : {info['latest']} ({verdict})")
     if info["error"]:
         out.append(f"  Last error       : {info['error']} ({when(info['last_attempt'])})")
+    can_install, why_not = self_update_status()
+    out.append(f"  Install from app : {'yes' if can_install else 'no, ' + why_not}")
 
     section("PLATFORMS")
     out.append("  Change these from the tray icon under \"Platforms\".")
@@ -2870,8 +2875,11 @@ RELEASE_TAG_RE = re.compile(r"^[0-9A-Za-z.\-]{1,64}$")
 UPDATE_LOCK = threading.Lock()
 # What the tray, Home Assistant and diagnostics show. last_check is the last
 # successful check, last_attempt the last try; both are wall-clock epochs.
+# installing is True while an update is being downloaded or waits for a game
+# to end; Home Assistant shows it as in progress.
 UPDATE_INFO = {"latest": "", "tag": "", "available": False,
-               "last_check": 0.0, "last_attempt": 0.0, "error": ""}
+               "last_check": 0.0, "last_attempt": 0.0, "error": "",
+               "installing": False}
 update_checker = None
 tray_icon = None
 
@@ -2939,8 +2947,8 @@ def _save_update_state(state):
             pass
 
 
-def fetch_latest_version():
-    """(version, tag) of this agent in the latest release. Raises on any problem."""
+def _fetch_manifest():
+    """The latest release's versions.json, as a dict. Raises on any problem."""
     # Only the app version goes out, in the User-Agent; nothing about the user.
     req = urllib.request.Request(
         UPDATE_MANIFEST_URL,
@@ -2954,11 +2962,20 @@ def fetch_latest_version():
     manifest = json.loads(content.decode('utf-8-sig'))
     if not isinstance(manifest, dict):
         raise ValueError("versions.json is not an object")
+    return manifest
+
+
+def _manifest_version(manifest):
     latest = manifest.get(UPDATE_PLATFORM_KEY)
     if not isinstance(latest, str) or not VERSION_RE.match(latest):
         raise ValueError(f"versions.json has no valid {UPDATE_PLATFORM_KEY!r} version: {latest!r}")
     tag = manifest.get("tag")
     return latest, (tag if isinstance(tag, str) and RELEASE_TAG_RE.match(tag) else "")
+
+
+def fetch_latest_version():
+    """(version, tag) of this agent in the latest release. Raises on any problem."""
+    return _manifest_version(_fetch_manifest())
 
 
 def get_update_config_topic():
@@ -2978,14 +2995,20 @@ def _update_state_payload():
     if latest:
         payload["latest_version"] = latest
         payload["release_url"] = release_url()
+    # Sent only where Home Assistant has an Install button. It's always sent
+    # there, true or false, because Home Assistant keeps the last value it saw.
+    if self_update_supported():
+        with UPDATE_LOCK:
+            payload["in_progress"] = UPDATE_INFO["installing"]
     return payload
 
 
 def setup_update_discovery(mqtt_client):
     """Publish the Home Assistant update entity, or remove it while the check is off.
 
-    It sits on the same device as the sensor. There is no command topic, so
-    Home Assistant offers no Install button, only the release link.
+    It sits on the same device as the sensor. Where this copy can replace
+    itself (see self_update_status) it also gets an Install button; elsewhere
+    Home Assistant offers only the release link.
     """
     if not update_check_enabled():
         # An empty retained config removes the entity; clear its state too.
@@ -3000,6 +3023,11 @@ def setup_update_discovery(mqtt_client):
         "unique_id": f"gsa_{PROFILE_SANITIZED}_update",
         "device": _ha_device(),
     }
+    # Home Assistant's Install button. Only offered where this copy can
+    # actually replace itself; elsewhere it shows just the release link.
+    if self_update_supported():
+        config_payload["command_topic"] = get_update_install_topic()
+        config_payload["payload_install"] = INSTALL_PAYLOAD
     mqtt_client.publish(get_update_config_topic(), json.dumps(config_payload), qos=1, retain=True)
     mqtt_client.publish(get_update_state_topic(), json.dumps(_update_state_payload()),
                         qos=1, retain=True)
@@ -3142,6 +3170,344 @@ def open_release_page(icon, item):
         debug_log(f"Could not open the release page: {e}")
 
 
+# --- SELF-UPDATE (released exe only) ---
+# A running exe can't be overwritten, but Windows does let it be renamed. The
+# new exe is downloaded beside this one as .new and checked against the
+# SHA-256 the release lists. Then this one becomes .old, the new one takes its
+# name and is started, and this copy exits. The path doesn't change, so Start
+# at login and gsa_config.json (next to the exe) carry on as they were.
+#
+# The checksum catches a corrupted or substituted download. It can't help if
+# the GitHub account itself is taken over, since that controls both files.
+RELEASE_ASSET_URL = ("https://github.com/adamjthompson/Gaming-Status-Agent"
+                     "/releases/download/{tag}/GamingStatusAgent.exe")
+MAX_EXE_BYTES = 256 * 1024 * 1024
+SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+INSTALL_PAYLOAD = "install"
+# The new copy waits this long before deleting the old exe, so a version that
+# fails on start leaves GamingStatusAgent.exe.old to rename back by hand.
+OLD_EXE_KEEP_SECONDS = 60
+IDLE_RECHECK_SECONDS = 30
+
+# Held from the start of an install until this copy exits (or the install
+# fails), so a second request can't start another one.
+INSTALL_LOCK = threading.Lock()
+_SELF_UPDATE_SUPPORT = None
+
+
+class UpdateInstallError(Exception):
+    pass
+
+
+def self_update_status():
+    """(supported, reason). Only a released exe in a folder this account can
+    write to can replace itself. Checked once; neither changes while running."""
+    global _SELF_UPDATE_SUPPORT
+    if _SELF_UPDATE_SUPPORT is None:
+        if not getattr(sys, 'frozen', False):
+            _SELF_UPDATE_SUPPORT = (False, "running from source")
+        else:
+            folder = os.path.dirname(sys.executable)
+            # os.access() ignores folder permissions on Windows; only a real
+            # write shows whether the swap could work.
+            try:
+                fd, probe = tempfile.mkstemp(prefix=".gsa_write_test_", dir=folder)
+                os.close(fd)
+                os.remove(probe)
+                _SELF_UPDATE_SUPPORT = (True, "")
+            except OSError as e:
+                _SELF_UPDATE_SUPPORT = (False, f"can't write to {folder} ({e.strerror or e})")
+    return _SELF_UPDATE_SUPPORT
+
+
+def self_update_supported():
+    return self_update_status()[0]
+
+
+def get_update_install_topic():
+    return f"homeassistant/update/gsa_{PROFILE_SANITIZED}/install"
+
+
+def fetch_install_info():
+    """(version, tag, sha256, size) for this agent's exe in the latest release."""
+    manifest = _fetch_manifest()
+    latest, tag = _manifest_version(manifest)
+    sha256 = manifest.get("windows_sha256")
+    size = manifest.get("windows_size")
+    if not tag:
+        raise UpdateInstallError("versions.json has no usable release tag")
+    if not isinstance(sha256, str) or not SHA256_RE.match(sha256):
+        raise UpdateInstallError("versions.json has no valid windows_sha256")
+    if isinstance(size, bool) or not isinstance(size, int) or not 0 < size <= MAX_EXE_BYTES:
+        raise UpdateInstallError("versions.json has no valid windows_size")
+    return latest, tag, sha256.lower(), size
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _download_verified(url, dest, sha256, size):
+    """Download to dest, which is kept only if the size and SHA-256 match."""
+    req = urllib.request.Request(url, headers={'User-Agent': f'Gaming-Status-Agent/{GSA_VERSION}'})
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response, open(dest, 'wb') as f:
+            if not response.geturl().lower().startswith("https://"):
+                raise UpdateInstallError("the download was redirected away from https")
+            while True:
+                chunk = response.read(256 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > size:
+                    raise UpdateInstallError("the download is larger than the release lists")
+                digest.update(chunk)
+                f.write(chunk)
+            f.flush()
+            os.fsync(f.fileno())
+        if total != size:
+            raise UpdateInstallError(f"the download is {total} bytes; the release lists {size}")
+        if digest.hexdigest() != sha256:
+            raise UpdateInstallError("the download doesn't match the release's SHA-256")
+    except BaseException:
+        _remove_quietly(dest)
+        raise
+
+
+def _game_running():
+    with STATE_LOCK:
+        return GLOBAL_STATE["status"] == "playing"
+
+
+def _wait_until_idle():
+    """Hold an install from Home Assistant until no game is being tracked, so a
+    remote update never cuts a play session short."""
+    if _game_running():
+        debug_log("Update will install once the current game ends.")
+        while _game_running():
+            time.sleep(IDLE_RECHECK_SECONDS)
+
+
+def _set_installing(flag):
+    with UPDATE_LOCK:
+        UPDATE_INFO["installing"] = flag
+    _publish_raw(get_update_state_topic(), json.dumps(_update_state_payload()))
+    refresh_tray_menu()
+
+
+def _child_environment():
+    """Environment for starting the new exe.
+
+    PyInstaller marks its own child processes through environment variables.
+    Left in place, the new exe would treat itself as part of this one and use
+    this copy's unpacked files, which are deleted when it exits.
+    """
+    env = dict(os.environ)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    for key in ("_MEIPASS2", "_PYI_APPLICATION_HOME_DIR", "_PYI_ARCHIVE_FILE",
+                "_PYI_PARENT_PROCESS_LEVEL", "_PYI_SPLASH_IPC", "TCL_LIBRARY", "TK_LIBRARY"):
+        env.pop(key, None)
+    return env
+
+
+def _swap_and_restart(new_path, latest):
+    """Put the verified new exe in place, start it and close this copy.
+
+    Any failure puts the old exe back and restarts the services, so a failed
+    update leaves things as they were.
+    """
+    exe = sys.executable
+    old_path = exe + ".old"
+    _remove_quietly(old_path)
+    with RESTART_LOCK:
+        # Publishes Offline and disconnects cleanly, exactly as Quit does.
+        stop_services()
+        try:
+            os.replace(exe, old_path)
+            try:
+                os.replace(new_path, exe)
+            except OSError:
+                os.replace(old_path, exe)
+                raise
+            try:
+                subprocess.Popen(
+                    [exe, "--updated-from", GSA_VERSION],
+                    cwd=os.path.dirname(exe), env=_child_environment(), close_fds=True,
+                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+            except OSError:
+                os.replace(exe, new_path)
+                os.replace(old_path, exe)
+                raise
+        except Exception:
+            with UPDATE_LOCK:
+                UPDATE_INFO["installing"] = False
+            start_services()
+            raise
+    debug_log(f"Started version {latest}; version {GSA_VERSION} is closing.")
+    icon = tray_icon
+    if icon:
+        try:
+            icon.stop()
+        except Exception:
+            pass
+    ROOT.after(0, ROOT.quit)
+
+
+def _install_worker(source):
+    new_path = sys.executable + ".new"
+    try:
+        _set_installing(True)
+        if source == "home assistant":
+            _wait_until_idle()
+        # Always the latest release's own version and hash; nothing about what
+        # to install comes from the request itself.
+        latest, tag, sha256, size = fetch_install_info()
+        if not _is_newer(latest, GSA_VERSION):
+            raise UpdateInstallError(f"{GSA_VERSION} is already the latest version")
+        debug_log(f"Downloading version {latest} ({size} bytes) from release {tag}.")
+        _download_verified(RELEASE_ASSET_URL.format(tag=tag), new_path, sha256, size)
+        if source == "home assistant":
+            # A game may have started during the download.
+            _wait_until_idle()
+        _swap_and_restart(new_path, latest)
+    except Exception as e:
+        _remove_quietly(new_path)
+        debug_log(f"Update install failed: {e}")
+        with UPDATE_LOCK:
+            UPDATE_INFO["error"] = f"Install failed: {e}"[:200]
+        _set_installing(False)
+        INSTALL_LOCK.release()
+        if source == "tray":
+            reason = str(e)
+            ROOT.after(0, lambda: _install_failed_dialog(reason))
+
+
+def start_install(source):
+    """Install the latest release in the background. False if one is running."""
+    if not INSTALL_LOCK.acquire(blocking=False):
+        debug_log("An update is already being installed.")
+        return False
+    threading.Thread(target=_install_worker, args=(source,), daemon=True,
+                     name="UpdateInstaller").start()
+    return True
+
+
+def _on_install_command(mqtt_client, userdata, message):
+    """Home Assistant's Install button. Runs on paho's network thread, so it
+    only checks the request and hands the work to start_install()."""
+    try:
+        if message.retain:
+            # A retained command is a leftover, not someone pressing Install.
+            debug_log("Ignoring a retained install command.")
+            return
+        if message.payload.strip() != INSTALL_PAYLOAD.encode():
+            return
+        if not (update_check_enabled() and self_update_supported()):
+            debug_log("Install requested from Home Assistant, but installing isn't available here.")
+            return
+        with UPDATE_LOCK:
+            available = UPDATE_INFO["available"]
+        if not available:
+            debug_log("Install requested from Home Assistant, but no newer version is known.")
+            return
+        debug_log("Install requested from Home Assistant.")
+        start_install("home assistant")
+    except Exception as e:
+        debug_log(f"Could not handle the install command: {e}")
+
+
+def subscribe_install_command(mqtt_client):
+    if self_update_supported():
+        topic = get_update_install_topic()
+        mqtt_client.message_callback_add(topic, _on_install_command)
+        mqtt_client.subscribe(topic, qos=1)
+
+
+def install_menu_visible(item=None):
+    with UPDATE_LOCK:
+        installing = UPDATE_INFO["installing"]
+    return update_menu_visible() and self_update_supported() and not installing
+
+
+def install_menu_text(item=None):
+    with UPDATE_LOCK:
+        latest = UPDATE_INFO["latest"]
+    return f"Install update {latest}"
+
+
+def install_update_from_tray(icon, item):
+    ROOT.after(0, _confirm_install)
+
+
+def _confirm_install():
+    with UPDATE_LOCK:
+        latest = UPDATE_INFO["latest"]
+    detail = "Gaming Status Agent will close, install it and start again."
+    if _game_running():
+        detail += " The game you're playing will show as a new session."
+    if messagebox.askyesno("Gaming Status Agent", f"Install version {latest}?\n\n{detail}"):
+        if not start_install("tray"):
+            messagebox.showinfo("Gaming Status Agent", "An update is already being installed.")
+
+
+def _install_failed_dialog(reason):
+    if messagebox.askyesno("Gaming Status Agent",
+                           f"The update couldn't be installed:\n{reason}\n\n"
+                           "Open the release page to download it yourself?"):
+        open_release_page(None, None)
+
+
+def _updated_from_arg():
+    try:
+        value = sys.argv[sys.argv.index("--updated-from") + 1]
+    except (ValueError, IndexError):
+        return ""
+    return value if VERSION_RE.match(value) else ""
+
+
+def finish_pending_update():
+    """At every start of the released exe: tidy up after an update."""
+    if not getattr(sys, 'frozen', False):
+        return
+    exe = sys.executable
+    updated_from = _updated_from_arg()
+    if updated_from:
+        debug_log(f"Updated from version {updated_from} to {GSA_VERSION}.")
+    # A .new left behind was never put in place; it's safe to remove now.
+    _remove_quietly(exe + ".new")
+    threading.Thread(target=_cleanup_old_exe, args=(exe + ".old", updated_from),
+                     daemon=True, name="UpdateCleanup").start()
+
+
+def _cleanup_old_exe(old_path, updated_from):
+    if updated_from:
+        # Give the tray icon a moment to appear before notifying.
+        time.sleep(5)
+        icon = tray_icon
+        if icon:
+            try:
+                icon.notify(f"Updated to version {GSA_VERSION}.", "Gaming Status Agent")
+            except Exception as e:
+                debug_log(f"Could not show the updated notification: {e}")
+    time.sleep(OLD_EXE_KEEP_SECONDS)
+    # The old copy may still be closing, which keeps its exe locked briefly.
+    for _ in range(60):
+        if not os.path.exists(old_path):
+            return
+        try:
+            os.remove(old_path)
+            debug_log("Removed the previous version's exe.")
+            return
+        except OSError:
+            time.sleep(5)
+    debug_log(f"Could not remove {old_path}; it can be deleted by hand.")
+
+
 def _build_mqtt_client():
     """paho-mqtt 2.x requires an explicit callback API version; 1.6 rejects it."""
     try:
@@ -3163,6 +3529,7 @@ def _on_connect(mqtt_client, userdata, *args):
         try:
             setup_mqtt_discovery(mqtt_client)
             setup_update_discovery(mqtt_client)
+            subscribe_install_command(mqtt_client)
             republish_current_state()
             if ubisoft_reporter:
                 ubisoft_reporter.request_publish()
@@ -4313,6 +4680,8 @@ def create_tray_menu():
                          checked=update_check_checked),
         pystray.MenuItem(update_menu_text, open_release_page,
                          visible=update_menu_visible),
+        pystray.MenuItem(install_menu_text, install_update_from_tray,
+                         visible=install_menu_visible),
         pystray.MenuItem("Run Diagnostics", open_diagnostics),
         pystray.MenuItem("Force Offline", force_offline),
         pystray.MenuItem("Quit", quit_app)
@@ -4368,6 +4737,7 @@ def main():
     global tray_icon, update_checker
     _init_logging()
     debug_log(f"=== GAMING STATUS AGENT {GSA_VERSION} LAUNCHED ===")
+    finish_pending_update()
     apply_window_icon()
     check_initial_config()
     repair_startup_entry()

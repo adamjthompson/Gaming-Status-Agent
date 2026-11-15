@@ -91,6 +91,7 @@ tray menu.
 | **Custom Games** | Match games Gaming Status Agent doesn't detect on its own, by executable or window title. Appears once **Custom** is switched on under Platforms |
 | **Check for Updates** | Checks once a day for a newer release (on by default). See [Updates](#updates) |
 | **Update available: x.y.z** | Opens the release page. Only shown when a newer version exists |
+| **Install update x.y.z** | *(Windows exe)* Downloads the new version, swaps it in and restarts. See [Installing an update](#installing-an-update) |
 | **Run Diagnostics** | Shows exactly what Gaming Status Agent currently sees and why. Start here when something looks wrong |
 | **Force Offline** | Immediately publish Offline, whatever detection thinks |
 | **Quit** | Publishes Offline, then exits |
@@ -126,11 +127,11 @@ one, it lets you know three ways:
 - an **Update available: x.y.z** item in the tray menu, which opens the release page
 - an update entity in Home Assistant, `update.gsa_<device name>`, on the same
   device as the sensor. Home Assistant lists it under **Settings → Updates**
-  with a link to the release. There's no Install button: download the new
-  version from the release page as usual.
+  with a link to the release, and, for the Windows exe, an **Install** button
+  (see below).
 
-Nothing is downloaded or installed automatically. The check fetches one small
-file, `versions.json`, from the latest release. It sends nothing about you; the
+Nothing is installed until you ask. The check itself fetches one small file,
+`versions.json`, from the latest release. It sends nothing about you; the
 only thing it identifies is the agent's own version, in the User-Agent header.
 Pre-releases are never offered.
 
@@ -139,6 +140,45 @@ To turn it off, untick **Check for Updates** in the tray menu, or set
 removes the update entity from Home Assistant. The time of the last check is
 kept in `gsa_update.json`, so restarting the agent doesn't trigger an extra
 check, and a version you've already been told about isn't announced again.
+
+### Installing an update
+
+The Windows exe can update itself, with no installer. Choose **Install update
+x.y.z** in the tray menu, or press **Install** on the update entity in Home
+Assistant. Gaming Status Agent then:
+
+1. downloads the new `GamingStatusAgent.exe` from the release into its own
+   folder, as `GamingStatusAgent.exe.new`
+2. checks that it matches the size and SHA-256 recorded in the release's
+   `versions.json`, and discards it if not
+3. publishes Offline, renames itself to `GamingStatusAgent.exe.old`, puts the
+   new exe in its place, and starts it
+
+The path doesn't change, so your settings (`gsa_config.json`, next to the exe)
+and **Start Gaming Status Agent at Login** carry on as before. The new version
+deletes `GamingStatusAgent.exe.old` a minute after it starts. If anything goes
+wrong before that, the old exe is put back and the agent keeps running, and
+you're offered the release page instead. If the new version won't start at all,
+delete `GamingStatusAgent.exe` and rename `GamingStatusAgent.exe.old` back to
+it.
+
+From the tray, it asks first. A game you're playing at that moment shows up as
+a new session after the restart. From Home Assistant there's nobody to ask, so
+it waits until no game is being tracked, and Home Assistant shows the update as
+in progress meanwhile.
+
+Installing needs a folder your Windows account can write to, such as the
+recommended `%LOCALAPPDATA%\Programs\GamingStatusAgent`. In a folder it can't
+write to (Program Files, say), the Install options don't appear; **Run
+Diagnostics** says why under Updates. Running from source, update with git
+instead.
+
+The SHA-256 check guards against a corrupted or swapped download. It can't
+protect against someone who has taken over the GitHub repository, since they
+could change both the exe and `versions.json`; the exe isn't code-signed. The
+Home Assistant **Install** button can be pressed by anything that can publish
+to your MQTT broker, but it can only ever install the latest official release,
+after the same checks.
 
 ---
 
@@ -604,9 +644,11 @@ the Releases page keeps the notes you wrote; one created by pushing a tag gets
 generated notes headed with both app versions. To rebuild an existing
 release, run the workflow by hand from the Actions tab and give it the tag.
 
-The workflow also attaches `versions.json`, which records the tag and both app
-versions. The agents' [daily update check](#updates) reads it from the latest
-release, so a release without it is invisible to them. Every release made by
+The workflow also attaches `versions.json`, which records the tag, both app
+versions, and the Windows exe's size and SHA-256. The agents' [daily update check](#updates) reads it from the latest
+release, so a release without it is invisible to them, and the Windows agent
+installs an update only if the exe matches it. It's written from the exe the
+same run builds, so a rebuild replaces both together. Every release made by
 the workflow includes it; don't remove it from a release by hand. Agents
 compare their own platform's version, so a release that only bumps the Linux
 agent doesn't prompt Windows users to update.
