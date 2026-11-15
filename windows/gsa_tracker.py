@@ -248,7 +248,11 @@ DEFAULT_CONFIG = {
     "UBISOFT_ACHIEVEMENTS": True,
     # Once a day, ask GitHub whether a newer release exists, and say so in the
     # tray and as a Home Assistant update entity. Switched from the tray.
-    "CHECK_FOR_UPDATES": True
+    "CHECK_FOR_UPDATES": True,
+    # Install a new version as soon as one is found and no game is running,
+    # instead of waiting for Install Update. Off by default. Switched from the
+    # tray, and only offered where the exe can replace itself.
+    "AUTO_INSTALL_UPDATES": False
 }
 
 # A launcher gets its own profile name only where the service has a distinct
@@ -669,7 +673,7 @@ def load_config():
     # A hand-edited config can carry "false" or 0 here; bool("false") is True,
     # so the string forms are resolved before coercing.
     for enable_key in (*PLATFORM_ENABLE_KEYS.values(), "UBISOFT_ACHIEVEMENTS",
-                       "CHECK_FOR_UPDATES"):
+                       "CHECK_FOR_UPDATES", "AUTO_INSTALL_UPDATES"):
         raw = merged.get(enable_key, DEFAULT_CONFIG[enable_key])
         if isinstance(raw, str):
             raw = raw.strip().lower() not in ("", "0", "false", "no", "off")
@@ -2581,6 +2585,8 @@ def build_diagnostic_report():
         out.append(f"  Last error       : {info['error']} ({when(info['last_attempt'])})")
     can_install, why_not = self_update_status()
     out.append(f"  Install from app : {'yes' if can_install else 'no, ' + why_not}")
+    if can_install:
+        out.append(f"  Auto-install     : {'on' if auto_install_checked() else 'off'}")
 
     section("PLATFORMS")
     out.append("  Change these from the tray icon under \"Platforms\".")
@@ -3042,18 +3048,23 @@ def refresh_tray_menu():
             debug_log(f"Could not refresh the tray menu: {e}")
 
 
-def notify_update(latest):
+def notify(message, title="Gaming Status Agent"):
     """Show a desktop notification. True if it was shown."""
     icon = tray_icon
     if not icon:
         return False
     try:
-        icon.notify(f"Version {latest} is available. Choose \"Update available\" "
-                    "in the tray menu to download it.", "Gaming Status Agent update")
+        icon.notify(message, title)
         return True
     except Exception as e:
-        debug_log(f"Could not show the update notification: {e}")
+        debug_log(f"Could not show a notification: {e}")
         return False
+
+
+def notify_update(latest):
+    action = "install" if self_update_supported() else "download"
+    return notify(f"Version {latest} is available. Open Updates in the tray menu to {action} it.",
+                  "Gaming Status Agent update")
 
 
 class UpdateChecker(threading.Thread):
@@ -3068,6 +3079,11 @@ class UpdateChecker(threading.Thread):
         super().__init__(daemon=True, name="UpdateChecker")
         self._wake = threading.Event()
         self._stopping = False
+        self._force = False
+        # Versions already installed automatically, or tried, this session. A
+        # failed automatic install isn't retried until the app restarts;
+        # Install Update in the tray still works.
+        self._auto_tried = set()
         self.state = load_update_state()
 
     def stop(self):
@@ -3076,6 +3092,12 @@ class UpdateChecker(threading.Thread):
 
     def wake(self):
         """Look again now; a check still only runs if one is due."""
+        self._wake.set()
+
+    def check_now(self):
+        """Check straight away, whatever the schedule or the daily setting,
+        and say what was found."""
+        self._force = True
         self._wake.set()
 
     def _sleep(self, seconds):
@@ -3089,21 +3111,24 @@ class UpdateChecker(threading.Thread):
         if not self._sleep(UPDATE_FIRST_DELAY):
             return
         while True:
+            force, self._force = self._force, False
             try:
-                self.check_if_due()
+                self.check_if_due(force)
+                self.maybe_auto_install()
             except Exception as e:
                 debug_log(f"Update check failed: {e}")
             if not self._sleep(UPDATE_WAKE_INTERVAL):
                 return
 
-    def check_if_due(self):
-        if not update_check_enabled():
-            return
+    def check_if_due(self, force=False):
         now = time.time()
-        last = self.state.get("last_check")
-        # A last check in the future means the clock moved back; check now.
-        if isinstance(last, (int, float)) and 0 <= now - last < UPDATE_CHECK_INTERVAL:
-            return
+        if not force:
+            if not update_check_enabled():
+                return
+            last = self.state.get("last_check")
+            # A last check in the future means the clock moved back; check now.
+            if isinstance(last, (int, float)) and 0 <= now - last < UPDATE_CHECK_INTERVAL:
+                return
         with UPDATE_LOCK:
             UPDATE_INFO["last_attempt"] = now
         try:
@@ -3112,6 +3137,8 @@ class UpdateChecker(threading.Thread):
             with UPDATE_LOCK:
                 UPDATE_INFO["error"] = str(e)[:200]
             debug_log(f"Update check failed, retrying within the hour: {e}")
+            if force:
+                notify(f"Couldn't check for updates: {e}")
             return
 
         available = _set_update_info(latest, tag)
@@ -3123,12 +3150,32 @@ class UpdateChecker(threading.Thread):
         else:
             debug_log(f"Update check: {GSA_VERSION} is current (latest release has {latest}).")
 
-        _publish_raw(get_update_state_topic(), json.dumps(_update_state_payload()))
+        # With the check off, the Home Assistant entity has been removed.
+        if update_check_enabled():
+            _publish_raw(get_update_state_topic(), json.dumps(_update_state_payload()))
         refresh_tray_menu()
-        # One notification per new version, not one a day.
-        if available and self.state.get("notified") != latest and notify_update(latest):
-            self.state["notified"] = latest
+        if available:
+            # One notification per new version, not one a day; Check Now always
+            # answers. With automatic installs on, the notification after
+            # the install says it instead.
+            if force or (self.state.get("notified") != latest and not auto_install_enabled()):
+                if notify_update(latest):
+                    self.state["notified"] = latest
+        elif force:
+            notify(f"Gaming Status Agent {GSA_VERSION} is up to date.")
         _save_update_state(self.state)
+
+    def maybe_auto_install(self):
+        if not auto_install_enabled():
+            return
+        with UPDATE_LOCK:
+            latest = UPDATE_INFO["latest"]
+            pending = UPDATE_INFO["available"] and not UPDATE_INFO["installing"]
+        if not pending or latest in self._auto_tried:
+            return
+        self._auto_tried.add(latest)
+        debug_log(f"Installing version {latest} automatically.")
+        start_install("auto")
 
 
 def toggle_update_check(icon, item):
@@ -3141,7 +3188,6 @@ def toggle_update_check(icon, item):
             setup_update_discovery(mqtt_client)
         except Exception as e:
             debug_log(f"Could not update the Home Assistant update entity: {e}")
-    # The tick and the "Update available" item both depend on this setting.
     refresh_tray_menu()
     if update_checker:
         update_checker.wake()
@@ -3151,16 +3197,64 @@ def update_check_checked(item=None):
     return update_check_enabled()
 
 
+def check_updates_now(icon, item):
+    if update_checker:
+        update_checker.check_now()
+
+
+def auto_install_enabled():
+    """Install new versions without asking. Off by default; needs the daily
+    check, and an exe that can replace itself."""
+    return (bool(CONFIG.get("AUTO_INSTALL_UPDATES", False)) and update_check_enabled()
+            and self_update_supported())
+
+
+def auto_install_checked(item=None):
+    return bool(CONFIG.get("AUTO_INSTALL_UPDATES", False))
+
+
+def toggle_auto_install(icon, item):
+    CONFIG["AUTO_INSTALL_UPDATES"] = not auto_install_checked()
+    save_config()
+    debug_log(f"Automatic update installs {'on' if auto_install_checked() else 'off'}.")
+    refresh_tray_menu()
+    # Installs an update that's already known, once no game is running.
+    if update_checker:
+        update_checker.wake()
+
+
 def update_menu_visible(item=None):
     with UPDATE_LOCK:
-        available = UPDATE_INFO["available"]
-    return update_check_enabled() and available
+        return UPDATE_INFO["available"]
+
+
+def release_menu_visible(item=None):
+    """Download Update opens the release page to update by hand. Where this
+    copy can install the update itself, Install Update takes its place."""
+    return update_menu_visible() and not self_update_supported()
 
 
 def update_menu_text(item=None):
     with UPDATE_LOCK:
         latest = UPDATE_INFO["latest"]
-    return f"Update available: {latest}"
+    return f"Download Update {latest}"
+
+
+def update_status_text(item=None):
+    """The greyed-out first line of the Updates menu."""
+    with UPDATE_LOCK:
+        info = dict(UPDATE_INFO)
+    if info.get("installing"):
+        return f"Installing version {info['latest']}..."
+    if info["available"]:
+        return f"Version {GSA_VERSION} ({info['latest']} available)"
+    if info["last_check"]:
+        return f"Version {GSA_VERSION} (up to date)"
+    return f"Version {GSA_VERSION}"
+
+
+def _menu_noop(icon, item):
+    pass
 
 
 def open_release_page(icon, item):
@@ -3362,7 +3456,8 @@ def _install_worker(source):
     new_path = sys.executable + ".new"
     try:
         _set_installing(True)
-        if source == "home assistant":
+        # Nobody may be at the PC for these, so they wait for idle.
+        if source != "tray":
             _wait_until_idle()
         # Always the latest release's own version and hash; nothing about what
         # to install comes from the request itself.
@@ -3371,7 +3466,7 @@ def _install_worker(source):
             raise UpdateInstallError(f"{GSA_VERSION} is already the latest version")
         debug_log(f"Downloading version {latest} ({size} bytes) from release {tag}.")
         _download_verified(RELEASE_ASSET_URL.format(tag=tag), new_path, sha256, size)
-        if source == "home assistant":
+        if source != "tray":
             # A game may have started during the download.
             _wait_until_idle()
         _swap_and_restart(new_path, latest)
@@ -3385,6 +3480,9 @@ def _install_worker(source):
         if source == "tray":
             reason = str(e)
             ROOT.after(0, lambda: _install_failed_dialog(reason))
+        elif source == "auto":
+            notify(f"The update couldn't be installed automatically: {e}. "
+                   "Open Updates in the tray menu to try again.")
 
 
 def start_install(source):
@@ -3437,7 +3535,7 @@ def install_menu_visible(item=None):
 def install_menu_text(item=None):
     with UPDATE_LOCK:
         latest = UPDATE_INFO["latest"]
-    return f"Install update {latest}"
+    return f"Install Update {latest}"
 
 
 def install_update_from_tray(icon, item):
@@ -3447,7 +3545,7 @@ def install_update_from_tray(icon, item):
 def _confirm_install():
     with UPDATE_LOCK:
         latest = UPDATE_INFO["latest"]
-    detail = "Gaming Status Agent will close, install it and start again."
+    detail = "Gaming Status Agent will close and restart after updating."
     if _game_running():
         detail += " The game you're playing will show as a new session."
     if messagebox.askyesno("Gaming Status Agent", f"Install version {latest}?\n\n{detail}"):
@@ -4664,6 +4762,26 @@ def run_setup_wizard():
     ROOT.wait_window(win)
 
 
+def create_updates_menu():
+    """The Updates submenu. Only one of Install Update / Download Update shows,
+    and only while a newer version is known."""
+    return pystray.Menu(
+        pystray.MenuItem(update_status_text, _menu_noop, enabled=False),
+        pystray.MenuItem(install_menu_text, install_update_from_tray,
+                         visible=install_menu_visible),
+        pystray.MenuItem(update_menu_text, open_release_page,
+                         visible=release_menu_visible),
+        pystray.MenuItem("Check Now", check_updates_now),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Check for Updates Daily", toggle_update_check,
+                         checked=update_check_checked),
+        pystray.MenuItem("Automatically Install Updates", toggle_auto_install,
+                         checked=auto_install_checked,
+                         enabled=lambda item: update_check_enabled(),
+                         visible=lambda item: self_update_supported())
+    )
+
+
 def create_tray_menu():
     # visible= takes a callable, re-evaluated each time the menu is opened, so
     # toggling a platform updates the menu without rebuilding the tray icon.
@@ -4676,12 +4794,7 @@ def create_tray_menu():
                          visible=lambda item: platform_enabled("Custom")),
         pystray.MenuItem("Start Gaming Status Agent at Login", toggle_startup,
                          checked=startup_enabled),
-        pystray.MenuItem("Check for Updates", toggle_update_check,
-                         checked=update_check_checked),
-        pystray.MenuItem(update_menu_text, open_release_page,
-                         visible=update_menu_visible),
-        pystray.MenuItem(install_menu_text, install_update_from_tray,
-                         visible=install_menu_visible),
+        pystray.MenuItem("Updates", create_updates_menu()),
         pystray.MenuItem("Run Diagnostics", open_diagnostics),
         pystray.MenuItem("Force Offline", force_offline),
         pystray.MenuItem("Quit", quit_app)

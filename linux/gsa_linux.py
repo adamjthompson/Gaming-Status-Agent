@@ -1308,25 +1308,30 @@ def refresh_tray_menu():
             debug_log(f"Could not refresh the tray menu: {e}")
 
 
-def notify_update(latest):
+def notify(message, title="Gaming Status Agent"):
     """Show a desktop notification. True if it was shown."""
     icon = tray_icon
     # Some pystray backends (plain X11 tray) cannot show notifications.
     if not icon or not getattr(icon, "HAS_NOTIFICATION", False):
         return False
     try:
-        icon.notify(f"Version {latest} is available. Choose \"Update available\" "
-                    "in the tray menu to download it.", "Gaming Status Agent update")
+        icon.notify(message, title)
         return True
     except Exception as e:
-        debug_log(f"Could not show the update notification: {e}")
+        debug_log(f"Could not show a notification: {e}")
         return False
+
+
+def notify_update(latest):
+    action = "download"
+    return notify(f"Version {latest} is available. Open Updates in the tray menu to {action} it.",
+                  "Gaming Status Agent update")
 
 
 class UpdateChecker(threading.Thread):
     """Checks for a newer release once a day, for as long as the app runs.
 
-    Started once at launch (tray or headless), not by start_services(): every Save & Apply
+    Started once at launch, not by start_services(): every Save & Apply
     restarts the services, and that must not re-check or re-notify. The last
     check time is saved, so restarts and sleep don't move the daily schedule.
     """
@@ -1335,6 +1340,7 @@ class UpdateChecker(threading.Thread):
         super().__init__(daemon=True, name="UpdateChecker")
         self._wake = threading.Event()
         self._stopping = False
+        self._force = False
         self.state = load_update_state()
 
     def stop(self):
@@ -1343,6 +1349,12 @@ class UpdateChecker(threading.Thread):
 
     def wake(self):
         """Look again now; a check still only runs if one is due."""
+        self._wake.set()
+
+    def check_now(self):
+        """Check straight away, whatever the schedule or the daily setting,
+        and say what was found."""
+        self._force = True
         self._wake.set()
 
     def _sleep(self, seconds):
@@ -1356,21 +1368,23 @@ class UpdateChecker(threading.Thread):
         if not self._sleep(UPDATE_FIRST_DELAY):
             return
         while True:
+            force, self._force = self._force, False
             try:
-                self.check_if_due()
+                self.check_if_due(force)
             except Exception as e:
                 debug_log(f"Update check failed: {e}")
             if not self._sleep(UPDATE_WAKE_INTERVAL):
                 return
 
-    def check_if_due(self):
-        if not update_check_enabled():
-            return
+    def check_if_due(self, force=False):
         now = time.time()
-        last = self.state.get("last_check")
-        # A last check in the future means the clock moved back; check now.
-        if isinstance(last, (int, float)) and 0 <= now - last < UPDATE_CHECK_INTERVAL:
-            return
+        if not force:
+            if not update_check_enabled():
+                return
+            last = self.state.get("last_check")
+            # A last check in the future means the clock moved back; check now.
+            if isinstance(last, (int, float)) and 0 <= now - last < UPDATE_CHECK_INTERVAL:
+                return
         with UPDATE_LOCK:
             UPDATE_INFO["last_attempt"] = now
         try:
@@ -1379,6 +1393,8 @@ class UpdateChecker(threading.Thread):
             with UPDATE_LOCK:
                 UPDATE_INFO["error"] = str(e)[:200]
             debug_log(f"Update check failed, retrying within the hour: {e}")
+            if force:
+                notify(f"Couldn't check for updates: {e}")
             return
 
         available = _set_update_info(latest, tag)
@@ -1390,11 +1406,18 @@ class UpdateChecker(threading.Thread):
         else:
             debug_log(f"Update check: {GSA_VERSION} is current (latest release has {latest}).")
 
-        _publish_retained(get_update_state_topic(), json.dumps(_update_state_payload()))
+        # With the check off, the Home Assistant entity has been removed.
+        if update_check_enabled():
+            _publish_retained(get_update_state_topic(), json.dumps(_update_state_payload()))
         refresh_tray_menu()
-        # One notification per new version, not one a day.
-        if available and self.state.get("notified") != latest and notify_update(latest):
-            self.state["notified"] = latest
+        if available:
+            # One notification per new version, not one a day; Check Now always
+            # answers.
+            if force or self.state.get("notified") != latest:
+                if notify_update(latest):
+                    self.state["notified"] = latest
+        elif force:
+            notify(f"Gaming Status Agent {GSA_VERSION} is up to date.")
         _save_update_state(self.state)
 
 
@@ -1408,7 +1431,6 @@ def toggle_update_check(icon, item):
             setup_update_discovery(mqtt_client)
         except Exception as e:
             debug_log(f"Could not update the Home Assistant update entity: {e}")
-    # The tick and the "Update available" item both depend on this setting.
     refresh_tray_menu()
     if update_checker:
         update_checker.wake()
@@ -1418,16 +1440,37 @@ def update_check_checked(item=None):
     return update_check_enabled()
 
 
+def check_updates_now(icon, item):
+    if update_checker:
+        update_checker.check_now()
+
+
 def update_menu_visible(item=None):
     with UPDATE_LOCK:
-        available = UPDATE_INFO["available"]
-    return update_check_enabled() and available
+        return UPDATE_INFO["available"]
 
 
 def update_menu_text(item=None):
     with UPDATE_LOCK:
         latest = UPDATE_INFO["latest"]
-    return f"Update available: {latest}"
+    return f"Download Update {latest}"
+
+
+def update_status_text(item=None):
+    """The greyed-out first line of the Updates menu."""
+    with UPDATE_LOCK:
+        info = dict(UPDATE_INFO)
+    if info.get("installing"):
+        return f"Installing version {info['latest']}..."
+    if info["available"]:
+        return f"Version {GSA_VERSION} ({info['latest']} available)"
+    if info["last_check"]:
+        return f"Version {GSA_VERSION} (up to date)"
+    return f"Version {GSA_VERSION}"
+
+
+def _menu_noop(icon, item):
+    pass
 
 
 def open_release_page(icon, item):
@@ -2083,6 +2126,20 @@ def create_image():
     return img
 
 
+def create_updates_menu():
+    """The Updates submenu. Download Update shows only while a newer version is known."""
+    import pystray
+    return pystray.Menu(
+        pystray.MenuItem(update_status_text, _menu_noop, enabled=False),
+        pystray.MenuItem(update_menu_text, open_release_page,
+                         visible=update_menu_visible),
+        pystray.MenuItem("Check Now", check_updates_now),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Check for Updates Daily", toggle_update_check,
+                         checked=update_check_checked)
+    )
+
+
 def create_tray_menu():
     import pystray
     return pystray.Menu(
@@ -2094,10 +2151,7 @@ def create_tray_menu():
                          visible=lambda item: platform_enabled("Custom")),
         pystray.MenuItem("Start Gaming Status Agent at Login", toggle_startup,
                          checked=startup_enabled),
-        pystray.MenuItem("Check for Updates", toggle_update_check,
-                         checked=update_check_checked),
-        pystray.MenuItem(update_menu_text, open_release_page,
-                         visible=update_menu_visible),
+        pystray.MenuItem("Updates", create_updates_menu()),
         pystray.MenuItem("Run Diagnostics", _on_ui(show_diagnostics_ui)),
         pystray.MenuItem("Force Offline", force_offline),
         pystray.MenuItem("Quit", quit_app)
