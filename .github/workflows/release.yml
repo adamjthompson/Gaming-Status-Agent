@@ -58,6 +58,13 @@ jobs:
           "WIN_VERSION=$win" >> $env:GITHUB_ENV
           "LINUX_VERSION=$lin" >> $env:GITHUB_ENV
           Write-Host "Release $env:TAG: Windows $win, Linux $lin"
+          # Read by the agents' daily update check, which fetches it from
+          # releases/latest/download/versions.json. Every release needs it, or
+          # agents can't tell that a newer version exists.
+          [ordered]@{ tag = $env:TAG; windows = $win; linux = $lin } |
+            ConvertTo-Json -Compress |
+            Set-Content -Path versions.json -Encoding utf8NoBOM -NoNewline
+          Get-Content versions.json
 
       - name: Install dependencies
         run: |
@@ -85,7 +92,7 @@ jobs:
 
       - name: Publish release
         run: |
-          $files = @("windows/dist/GamingStatusAgent.exe", "gaming-status-agent-linux-$env:LINUX_VERSION.zip")
+          $files = @("windows/dist/GamingStatusAgent.exe", "gaming-status-agent-linux-$env:LINUX_VERSION.zip", "versions.json")
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
             # Created from the Releases page: add the builds, keep its notes.
