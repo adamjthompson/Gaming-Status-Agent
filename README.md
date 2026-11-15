@@ -89,9 +89,7 @@ tray menu.
 | **Platforms** | Which stores to track — Steam and Xbox start switched off |
 | **Gamertags** | Your gamertag per store — shown as the sensor's `Profile Name`. Lists only the platforms you're tracking |
 | **Custom Games** | Match games Gaming Status Agent doesn't detect on its own, by executable or window title. Appears once **Custom** is switched on under Platforms |
-| **Check for Updates** | Checks once a day for a newer release (on by default). See [Updates](#updates) |
-| **Update available: x.y.z** | Opens the release page. Only shown when a newer version exists |
-| **Install update x.y.z** | *(Windows exe)* Downloads the new version, swaps it in and restarts. See [Installing an update](#installing-an-update) |
+| **Updates** | Your version, update settings, and installing a new version. See [The Updates menu](#the-updates-menu) |
 | **Run Diagnostics** | Shows exactly what Gaming Status Agent currently sees and why. Start here when something looks wrong |
 | **Force Offline** | Immediately publish Offline, whatever detection thinks |
 | **Quit** | Publishes Offline, then exits |
@@ -124,28 +122,44 @@ Once a day, Gaming Status Agent checks GitHub for a newer release. When it finds
 one, it lets you know three ways:
 
 - a desktop notification, once per new version
-- an **Update available: x.y.z** item in the tray menu, which opens the release page
+- an item in the tray's [Updates menu](#the-updates-menu): **Install Update
+  x.y.z** on the Windows exe, or otherwise **Download Update x.y.z**
 - an update entity in Home Assistant, `update.gsa_<device name>`, on the same
   device as the sensor. Home Assistant lists it under **Settings → Updates**
   with a link to the release, and, for the Windows exe, an **Install** button
   (see below).
 
-Nothing is installed until you ask. The check itself fetches one small file,
+Nothing is installed until you ask, unless you turn on [automatic
+installs](#installing-updates-automatically). The check itself fetches one small file,
 `versions.json`, from the latest release. It sends nothing about you; the
 only thing it identifies is the agent's own version, in the User-Agent header.
 Pre-releases are never offered.
 
-To turn it off, untick **Check for Updates** in the tray menu, or set
-[`CHECK_FOR_UPDATES`](#check_for_updates) to `false`. Turning it off also
+To turn it off, untick **Updates → Check for Updates Daily** in the tray menu,
+or set [`CHECK_FOR_UPDATES`](#check_for_updates) to `false`. Turning it off also
 removes the update entity from Home Assistant. The time of the last check is
 kept in `gsa_update.json`, so restarting the agent doesn't trigger an extra
 check, and a version you've already been told about isn't announced again.
 
+### The Updates menu
+
+| Item | What it does |
+|---|---|
+| **Version x.y.z** | Greyed out. Your version, and whether a newer one is available or it's up to date |
+| **Install Update x.y.z** | *(Windows exe)* Installs the newer version. See [Installing an update](#installing-an-update) |
+| **Download Update x.y.z** | Opens the release page, where installing from the app isn't available (Linux, running from source, or a folder the agent can't write to) |
+| **Check Now** | Checks straight away, even with daily checks off, and tells you what it found |
+| **Check for Updates Daily** | The once-a-day check (on by default). Turning it off also removes the update entity from Home Assistant |
+| **Automatically Install Updates** | *(Windows exe)* Installs new versions without asking (off by default). Needs **Check for Updates Daily** on. See [below](#installing-updates-automatically) |
+
+Only one of **Install Update** and **Download Update** appears, and only while
+a newer version is known.
+
 ### Installing an update
 
-The Windows exe can update itself, with no installer. Choose **Install update
-x.y.z** in the tray menu, or press **Install** on the update entity in Home
-Assistant. Gaming Status Agent then:
+The Windows exe can update itself, with no installer. Choose **Updates → Install
+Update x.y.z** in the tray menu, or press **Install** on the update entity in
+Home Assistant. Gaming Status Agent then:
 
 1. downloads the new `GamingStatusAgent.exe` from the release into its own
    folder, as `GamingStatusAgent.exe.new`
@@ -166,6 +180,19 @@ From the tray, it asks first. A game you're playing at that moment shows up as
 a new session after the restart. From Home Assistant there's nobody to ask, so
 it waits until no game is being tracked, and Home Assistant shows the update as
 in progress meanwhile.
+
+### Installing updates automatically
+
+Tick **Updates → Automatically Install Updates** (or set
+[`AUTO_INSTALL_UPDATES`](#auto_install_updates) to `true`), and a new version is
+installed as soon as the daily check finds it, the same way as an install from
+Home Assistant: it waits until no game is being tracked, then updates and
+restarts. A notification says so once the new version is running. Turning it
+on with an update already waiting installs that one.
+
+If an automatic install fails, a notification says why, and it isn't tried
+again until the agent restarts; **Install Update** still works in the meantime.
+It's off by default, and only offered where the exe can update itself.
 
 Installing needs a folder your Windows account can write to, such as the
 recommended `%LOCALAPPDATA%\Programs\GamingStatusAgent`. In a folder it can't
@@ -401,7 +428,16 @@ costs more CPU.
 
 `true` (default) checks GitHub once a day for a newer release; see
 [Updates](#updates). `false` turns the check off and removes the Home Assistant
-update entity. The tray's **Check for Updates** item changes the same setting.
+update entity. The tray's **Updates → Check for Updates Daily** item changes
+the same setting.
+
+### `AUTO_INSTALL_UPDATES`
+
+*(Windows exe)* `false` (default) waits for you to choose **Install Update**.
+`true` installs a new version as soon as it's found and no game is being
+tracked; see [Installing updates automatically](#installing-updates-automatically).
+It needs `CHECK_FOR_UPDATES` on. The tray's **Updates → Automatically Install
+Updates** item changes the same setting.
 
 ---
 
@@ -437,7 +473,7 @@ two kinds of outbound internet request, and sends no telemetry:
 - fetching the Ubisoft name catalog (while Ubisoft is tracked)
 - the daily [update check](#updates), which downloads `versions.json` from
   GitHub and sends nothing but the agent's version. Switch it off with
-  **Check for Updates** in the tray menu.
+  **Updates → Check for Updates Daily** in the tray menu.
 
 Your MQTT password is encrypted at rest with Windows DPAPI, scoped to your
 Windows account on this machine. A config file copied to another PC won't
