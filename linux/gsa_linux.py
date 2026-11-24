@@ -194,6 +194,9 @@ HEROIC_GAMES = []
 HEROIC_SCAN_INFO = {"root": "", "Epic": 0, "GOG": 0, "Amazon Games": 0}
 # Heroic app name -> (title, launcher label), for games found by environment.
 HEROIC_BY_APP = {}
+# Game title -> GOG product ID (Heroic's app name for GOG games), published as
+# "GOG Game ID" so Gaming Status can find the game's GOG achievements exactly.
+GOG_ID_BY_TITLE = {}
 
 
 def platform_enabled(launcher_name):
@@ -544,9 +547,10 @@ def get_heroic_games():
     Also fills HEROIC_BY_APP, app name -> (title, label), for the environment
     fallback in find_heroic_game().
     """
-    global HEROIC_BY_APP
+    global HEROIC_BY_APP, GOG_ID_BY_TITLE
     games = []
     by_app = {}
+    gog_ids = {}
     seen_dirs = set()
     roots = find_heroic_roots()
     counts = {"Epic": 0, "GOG": 0, "Amazon Games": 0}
@@ -557,6 +561,8 @@ def get_heroic_games():
         title = str(title)
         if app_name:
             by_app[str(app_name)] = (title, label)
+            if label == "GOG" and str(app_name).isdigit():
+                gog_ids.setdefault(title, str(app_name))
         if not path or not os.path.isdir(os.path.expanduser(path)):
             return
         install_dir = _normalised_dir(path)
@@ -604,6 +610,7 @@ def get_heroic_games():
     # Longest path first, so a game installed inside another's folder wins.
     games.sort(key=lambda g: len(g[0]), reverse=True)
     HEROIC_BY_APP = by_app
+    GOG_ID_BY_TITLE = gog_ids
     HEROIC_SCAN_INFO.update({"root": ", ".join(roots), **counts})
     if roots:
         debug_log(f"Heroic ({', '.join(roots)}): {counts}")
@@ -1006,6 +1013,15 @@ def resolve_sources(snapshot):
 
 
 # --- MQTT ---
+def gog_game_id(launcher, game_title):
+    """The "GOG Game ID" payload value: the running GOG game's product ID when
+    the published game is a GOG one, else "None" (which Gaming Status
+    ignores)."""
+    if launcher != "GOG":
+        return "None"
+    return GOG_ID_BY_TITLE.get(game_title, "None")
+
+
 def _payload(game_title, launcher, start_time, end_time, profile):
     return {
         "Profile Name": profile,
@@ -1014,7 +1030,8 @@ def _payload(game_title, launcher, start_time, end_time, profile):
         "Start Time": start_time,
         "End Time": end_time,
         "Machine": MACHINE_NAME,
-        "OS": "Linux"
+        "OS": "Linux",
+        "GOG Game ID": gog_game_id(launcher, game_title)
     }
 
 

@@ -109,6 +109,7 @@ title. Attributes:
 | `Machine` | The computer's name, e.g. `GAMING-PC` |
 | `OS` | `Windows` or `Linux` |
 | `Epic Sandbox ID` | *(Windows)* The running Epic game's catalog ID, e.g. `9773aa1aa54f4f7b80e44bef04986cea`, or `None`. Gaming Status uses it to find the game's Epic achievements exactly |
+| `GOG Game ID` | The running GOG game's product ID, e.g. `1207658995`, or `None`. Gaming Status uses it to find the game's GOG achievements exactly |
 | `Ubisoft Game ID` | *(Windows)* The running Ubisoft game's ID, e.g. `1713`, or `None` |
 | `Ubisoft Topic` | *(Windows)* Where the Ubisoft achievements and library are published (see [Ubisoft achievements](#ubisoft-achievements-and-library)), or `None` when that's switched off |
 
