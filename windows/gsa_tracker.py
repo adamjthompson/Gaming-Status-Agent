@@ -31,7 +31,7 @@ import gsa_ubisoft
  
 # Keep in step with version_info.txt, which stamps the same numbers into the
 # exe so Windows shows "Gaming Status Agent" rather than "GamingStatusAgent.exe".
-GSA_VERSION = "1.5.0"
+GSA_VERSION = "1.5.1"
 
 # --- GLOBALS & PATHS ---
 client = None
