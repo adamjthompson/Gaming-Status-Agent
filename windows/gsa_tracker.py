@@ -85,6 +85,10 @@ UBISOFT_GAME = None
 # whose full path cannot be read.
 GOG_BY_PATH = {}
 GOG_BY_NAME = {}
+# Game name -> GOG product ID (the registry key the game is installed under),
+# published as "GOG Game ID" so Gaming Status can find the game's GOG
+# achievements exactly instead of by title.
+GOG_ID_BY_TITLE = {}
 
 # Installed Battle.net games: normalised install directory (with trailing
 # separator) -> game name. Any process running from inside one is that game.
@@ -801,11 +805,11 @@ def get_gog_mapping():
     games are DRM free and are often started straight from a shortcut, with
     Galaxy never running at all.
 
-    Returns (by_path, by_name).
+    Returns (by_path, by_name, id_by_title).
     """
-    by_path, by_name = {}, {}
+    by_path, by_name, id_by_title = {}, {}, {}
     for hive, reg_path in GOG_REG_PATHS:
-        for _, game_key in _enum_subkeys(hive, reg_path):
+        for key_name, game_key in _enum_subkeys(hive, reg_path):
             try:
                 name = _reg_value(game_key, "gameName")
                 exe_path = _reg_value(game_key, "exe")
@@ -814,6 +818,11 @@ def get_gog_mapping():
 
                 if not name:
                     continue
+                # Each game's key is named after its product ID, which the
+                # gameID value repeats.
+                product_id = str(_reg_value(game_key, "gameID") or key_name).strip()
+                if product_id.isdigit():
+                    id_by_title.setdefault(name, product_id)
                 if not exe_path and install_dir and exe_file:
                     exe_path = os.path.join(install_dir, exe_file)
                 if exe_path:
@@ -826,7 +835,7 @@ def get_gog_mapping():
                 continue
 
     debug_log(f"Found {len(by_path)} installed GOG games in the registry.")
-    return by_path, by_name
+    return by_path, by_name, id_by_title
 
 
 def get_battlenet_mapping():
@@ -1555,6 +1564,7 @@ def publish_global_state(status, game_title, launcher_name, wait=False):
             "Machine": MACHINE_NAME,
             "OS": "Windows",
             "Epic Sandbox ID": epic_sandbox_id(GLOBAL_STATE["launcher"], game_title),
+            "GOG Game ID": gog_game_id(GLOBAL_STATE["launcher"], game_title),
             "Ubisoft Game ID": ubisoft_game_id(GLOBAL_STATE["launcher"]),
             "Ubisoft Topic": ubisoft_topic_field()
         }
@@ -1588,6 +1598,7 @@ def _offline_payload():
         "Machine": MACHINE_NAME,
         "OS": "Windows",
         "Epic Sandbox ID": "None",
+        "GOG Game ID": "None",
         "Ubisoft Game ID": "None",
         "Ubisoft Topic": ubisoft_topic_field()
     }
@@ -1656,6 +1667,15 @@ def ubisoft_topic_field():
     are published, or "None" when that's switched off. Sent in every payload,
     offline too, so Gaming Status can show the library while not playing."""
     return ubisoft_topic_base() if ubisoft_reporting_enabled() else "None"
+
+
+def gog_game_id(launcher, game_title):
+    """The "GOG Game ID" payload value: the running GOG game's product ID when
+    the published game is a GOG one, else "None" (the payload's usual
+    placeholder, which Gaming Status ignores)."""
+    if launcher != "GOG":
+        return "None"
+    return GOG_ID_BY_TITLE.get(game_title, "None")
 
 
 def ubisoft_game_id(launcher):
@@ -1751,6 +1771,7 @@ def republish_current_state():
         "Machine": MACHINE_NAME,
         "OS": "Windows",
         "Epic Sandbox ID": epic_sandbox_id(state["launcher"], state["game"]),
+        "GOG Game ID": gog_game_id(state["launcher"], state["game"]),
         "Ubisoft Game ID": ubisoft_game_id(state["launcher"]),
         "Ubisoft Topic": ubisoft_topic_field()
     }
@@ -3779,7 +3800,7 @@ def _start_mqtt():
 def start_services():
     global observer, custom_tracker, ubisoft_reporter
     global CONFIG, PROFILE_SANITIZED
-    global GOG_BY_PATH, GOG_BY_NAME, BATTLENET_BY_DIR
+    global GOG_BY_PATH, GOG_BY_NAME, GOG_ID_BY_TITLE, BATTLENET_BY_DIR
     global STEAM_BY_DIR, STEAM_BY_APPID, XBOX_BY_DIR
     debug_log("Starting Gaming Status Agent services...")
 
@@ -3826,7 +3847,8 @@ def start_services():
     # Save & Apply rather than needing Gaming Status Agent to be closed and reopened.
     # A platform that is off is left with an empty map, which every lookup
     # already treats as "nothing to match".
-    GOG_BY_PATH, GOG_BY_NAME = get_gog_mapping() if platform_enabled("GOG") else ({}, {})
+    GOG_BY_PATH, GOG_BY_NAME, GOG_ID_BY_TITLE = (
+        get_gog_mapping() if platform_enabled("GOG") else ({}, {}, {}))
     BATTLENET_BY_DIR = get_battlenet_mapping() if platform_enabled("Battle.net") else {}
     STEAM_BY_DIR, STEAM_BY_APPID = get_steam_mapping() if platform_enabled("Steam") else ({}, {})
     XBOX_BY_DIR = get_xbox_mapping() if platform_enabled("Xbox") else {}

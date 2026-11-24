@@ -32,7 +32,7 @@ def main():
     # Each scan is skipped when its platform is off, matching start_services(),
     # so the report shows what the running agent would actually see.
     if gsa.platform_enabled("GOG"):
-        gsa.GOG_BY_PATH, gsa.GOG_BY_NAME = gsa.get_gog_mapping()
+        gsa.GOG_BY_PATH, gsa.GOG_BY_NAME, gsa.GOG_ID_BY_TITLE = gsa.get_gog_mapping()
     if gsa.platform_enabled("Battle.net"):
         gsa.BATTLENET_BY_DIR = gsa.get_battlenet_mapping()
     if gsa.platform_enabled("Steam"):
