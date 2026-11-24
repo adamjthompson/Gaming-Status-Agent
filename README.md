@@ -87,7 +87,7 @@ tray menu.
 |---|---|
 | **MQTT Settings** | Broker address, port, credentials, TLS, the device name, poll rate |
 | **Platforms** | Which stores to track — Steam and Xbox start switched off |
-| **Gamertags** | Your gamertag per store — shown as the sensor's `Profile Name`. Lists only the platforms you're tracking |
+| **Gamertags** | Your gamertag per store — shown as the sensor's `Profile Name`. Lists only the platforms you're tracking. The Ubisoft one is also sent with the Ubisoft library (when **Send Ubisoft achievements and library to Home Assistant** is on), because Ubisoft Connect doesn't keep the account name on the PC |
 | **Custom Games** | Match games Gaming Status Agent doesn't detect on its own, by executable or window title. Appears once **Custom** is switched on under Platforms |
 | **Updates** | Your version, update settings, and installing a new version. See [The Updates menu](#the-updates-menu) |
 | **Run Diagnostics** | Shows exactly what Gaming Status Agent currently sees and why. Start here when something looks wrong |

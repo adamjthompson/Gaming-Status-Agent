@@ -29,9 +29,7 @@ import psutil
 
 import gsa_ubisoft
  
-# Keep in step with version_info.txt, which stamps the same numbers into the
-# exe so Windows shows "Gaming Status Agent" rather than "GamingStatusAgent.exe".
-GSA_VERSION = "1.5.1"
+GSA_VERSION = "1.5.2"
 
 # --- GLOBALS & PATHS ---
 client = None
@@ -2012,6 +2010,14 @@ class UbisoftReporter(threading.Thread):
         library, icons = scan_ubisoft_library(self.names, self.install_dir)
         if self.stop_event.is_set():
             return
+        # Ubisoft Connect's cache has no account name, so the Ubisoft field in
+        # the Gamertags menu is sent with the library; Home Assistant shows it
+        # as the player's Ubisoft gamertag even before a Ubisoft session. Only
+        # the field itself -- never the device-name fallback profile_for_launcher
+        # uses -- and left out when blank.
+        gamertag = _clean_name(CONFIG.get(LAUNCHER_PROFILE_KEYS["Ubisoft"]))
+        if gamertag:
+            library["gamertag"] = gamertag[:100]
         # Icons first, so Home Assistant has them by the time the unlock
         # they belong to arrives.
         sent = self.sent.setdefault(self.base, set())
